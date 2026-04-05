@@ -5,10 +5,11 @@
  * Maestro is the sole writer of the status table.
  */
 
-import { writeFileSync, existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ParsedTask } from "./types.js";
 import type { TaskManager } from "./task-manager.js";
+import { atomicWrite } from "./utils.js";
 
 export class StatusManager {
   private statusPath: string;
@@ -46,7 +47,7 @@ export class StatusManager {
     }
 
     lines.push("");
-    writeFileSync(this.statusPath, lines.join("\n"), "utf-8");
+    atomicWrite(this.statusPath, lines.join("\n"));
   }
 
   /**

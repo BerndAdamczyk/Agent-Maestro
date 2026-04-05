@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.log
 .claude/
+memory/sessions/*.jsonl
+memory/sessions/prompt-*.md
