@@ -1,0 +1,116 @@
+/* Agent Maestro - Dark Theme SPA */
+:root {
+  --bg: #0d1117; --bg2: #161b22; --bg3: #21262d; --border: #30363d;
+  --text: #e6edf3; --text2: #8b949e; --text3: #484f58;
+  --maestro: #FF6B6B; --planning: #4ECDC4; --engineering: #FFEAA7; --validation: #F7DC6F;
+  --pending: #8b949e; --in_progress: #58a6ff; --plan_ready: #d29922;
+  --plan_approved: #3fb8af; --complete: #3fb950; --failed: #f85149;
+  --plan_revision_needed: #db6d28;
+  --radius: 8px; --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); font-size: 14px; }
+#app { display: flex; flex-direction: column; height: 100vh; }
+header { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--bg2); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+header h1 { font-size: 16px; font-weight: 600; white-space: nowrap; }
+header .status { font-size: 12px; color: var(--text2); margin-left: auto; font-family: var(--mono); }
+nav { display: flex; gap: 2px; flex-shrink: 0; padding: 0 16px; background: var(--bg2); border-bottom: 1px solid var(--border); }
+nav button { background: none; border: none; color: var(--text2); padding: 8px 14px; cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent; transition: all .15s; }
+nav button:hover { color: var(--text); }
+nav button.active { color: var(--text); border-bottom-color: var(--maestro); }
+main { flex: 1; overflow: hidden; position: relative; }
+.view { display: none; height: 100%; overflow-y: auto; padding: 16px; }
+.view.active { display: block; }
+
+/* Chat View */
+#chat-view { display: none; flex-direction: column; }
+#chat-view.active { display: flex; }
+.chat-feed { flex: 1; overflow-y: auto; padding: 16px; display: flex; flex-direction: column; gap: 8px; }
+.chat-msg { display: flex; gap: 10px; padding: 10px 12px; border-radius: var(--radius); background: var(--bg2); animation: fadeSlide .3s ease; max-width: 100%; }
+@keyframes fadeSlide { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+.avatar { width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px; color: #000; flex-shrink: 0; }
+.msg-body { flex: 1; min-width: 0; }
+.msg-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.msg-header .name { font-weight: 600; font-size: 13px; }
+.badge { font-size: 10px; padding: 1px 6px; border-radius: 10px; font-weight: 600; text-transform: uppercase; }
+.badge-maestro { background: var(--maestro); color: #000; }
+.badge-lead { background: var(--planning); color: #000; }
+.badge-worker { background: var(--engineering); color: #000; }
+.msg-header .ts { font-size: 11px; color: var(--text3); margin-left: auto; font-family: var(--mono); }
+.msg-text { font-size: 13px; line-height: 1.5; color: var(--text2); word-break: break-word; }
+.msg-text code { background: var(--bg3); padding: 1px 4px; border-radius: 3px; font-family: var(--mono); font-size: 12px; }
+
+/* Task card in chat */
+.task-card { margin-top: 6px; padding: 8px 10px; background: var(--bg3); border-radius: 6px; border-left: 3px solid var(--in_progress); }
+.task-card .tc-title { font-weight: 600; font-size: 13px; }
+.task-card .tc-id { font-size: 11px; color: var(--text3); font-family: var(--mono); }
+
+/* Handoff card */
+.handoff-card { margin-top: 6px; background: var(--bg3); border-radius: 6px; overflow: hidden; }
+.handoff-card summary { padding: 8px 10px; cursor: pointer; font-weight: 600; font-size: 12px; }
+.handoff-card .hc-section { padding: 6px 10px; border-top: 1px solid var(--border); }
+.handoff-card .hc-section h4 { font-size: 11px; color: var(--text3); text-transform: uppercase; margin-bottom: 2px; }
+.handoff-card .hc-section p { font-size: 12px; color: var(--text2); white-space: pre-wrap; }
+
+/* Status badge */
+.status-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+.status-pending { background: var(--pending); color: #000; }
+.status-in_progress { background: var(--in_progress); color: #000; }
+.status-plan_ready { background: var(--plan_ready); color: #000; }
+.status-plan_approved { background: var(--plan_approved); color: #000; }
+.status-plan_revision_needed { background: var(--plan_revision_needed); color: #000; }
+.status-complete { background: var(--complete); color: #000; }
+.status-failed { background: var(--failed); color: #fff; }
+
+/* Approve/Revise buttons */
+.action-btns { display: flex; gap: 8px; margin-top: 8px; }
+.btn { padding: 5px 14px; border: none; border-radius: var(--radius); cursor: pointer; font-size: 12px; font-weight: 600; transition: opacity .15s; }
+.btn:hover { opacity: .85; }
+.btn-approve { background: var(--complete); color: #000; }
+.btn-revise { background: var(--plan_ready); color: #000; }
+
+/* Reconciliation */
+.recon-pass { color: var(--complete); font-weight: 700; }
+.recon-fail { color: var(--failed); font-weight: 700; }
+
+/* Dashboard */
+.dash-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.card h3 { font-size: 13px; color: var(--text3); text-transform: uppercase; margin-bottom: 8px; }
+.card .big { font-size: 28px; font-weight: 700; }
+.log-list { max-height: 300px; overflow-y: auto; }
+.log-item { padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 12px; display: flex; gap: 8px; }
+.log-item .la { color: var(--planning); font-weight: 600; min-width: 80px; }
+.log-item .lt { color: var(--text3); font-family: var(--mono); font-size: 11px; min-width: 60px; }
+
+/* Tasks table */
+.task-table { width: 100%; border-collapse: collapse; }
+.task-table th, .task-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.task-table th { color: var(--text3); font-size: 11px; text-transform: uppercase; position: sticky; top: 0; background: var(--bg); }
+.task-table tr { cursor: pointer; transition: background .1s; }
+.task-table tr:hover { background: var(--bg2); }
+.task-detail { background: var(--bg2); padding: 12px; border-radius: var(--radius); margin: 4px 0; font-size: 13px; }
+.task-detail p { margin: 4px 0; color: var(--text2); }
+.filters { display: flex; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.filters select { background: var(--bg2); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius); padding: 4px 8px; font-size: 12px; }
+
+/* Agents grid */
+.agent-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.agent-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; border-left: 4px solid var(--text3); }
+.agent-card h3 { font-size: 14px; margin-bottom: 6px; }
+.agent-card .meta { font-size: 12px; color: var(--text2); }
+.agent-card .skills { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 6px; }
+.agent-card .skill-tag { font-size: 10px; background: var(--bg3); padding: 2px 6px; border-radius: 4px; }
+.hierarchy-indent { padding-left: 20px; border-left: 2px solid var(--border); margin-left: 10px; }
+
+/* Memory / Config views */
+.mem-layout { display: flex; gap: 16px; height: 100%; }
+.mem-sidebar { width: 200px; flex-shrink: 0; overflow-y: auto; }
+.mem-sidebar button { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text2); padding: 6px 10px; cursor: pointer; font-size: 12px; border-radius: 4px; }
+.mem-sidebar button:hover, .mem-sidebar button.active { background: var(--bg3); color: var(--text); }
+.mem-content { flex: 1; overflow-y: auto; }
+pre.config-display { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-x: auto; line-height: 1.5; }
+.ws-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.ws-dot.on { background: var(--complete); }
+.ws-dot.off { background: var(--failed); }

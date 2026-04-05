@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Maestro</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Agent Maestro</h1>
+    <span class="status"><span class="ws-dot off" id="ws-dot"></span> <span id="ws-label">disconnected</span></span>
+  </header>
+  <nav id="tabs">
+    <button class="active" data-view="chat">Chat</button>
+    <button data-view="dashboard">Dashboard</button>
+    <button data-view="tasks">Tasks</button>
+    <button data-view="agents">Agents</button>
+    <button data-view="memory">Memory</button>
+    <button data-view="config">Config</button>
+  </nav>
+  <main>
+    <div id="chat-view" class="view active">
+      <div class="chat-feed" id="chat-feed"></div>
+    </div>
+    <div id="dashboard-view" class="view">
+      <div class="dash-grid" id="dash-grid"></div>
+    </div>
+    <div id="tasks-view" class="view">
+      <div class="filters" id="task-filters"></div>
+      <table class="task-table"><thead><tr>
+        <th>ID</th><th>Title</th><th>Assigned To</th><th>Wave</th><th>Status</th><th>Phase</th>
+      </tr></thead><tbody id="task-tbody"></tbody></table>
+    </div>
+    <div id="agents-view" class="view">
+      <div id="agents-container"></div>
+    </div>
+    <div id="memory-view" class="view">
+      <div class="mem-layout">
+        <div class="mem-sidebar" id="mem-sidebar"></div>
+        <div class="mem-content"><pre class="config-display" id="mem-content">Select a directory to browse.</pre></div>
+      </div>
+    </div>
+    <div id="config-view" class="view">
+      <pre class="config-display" id="config-display">Loading...</pre>
+    </div>
+  </main>
+</div>
+<script>
+(() => {
+'use strict';
+
+// ── State ──────────────────────────────────────────────────────────
+const S = {
+  tasks: [], agents: [], config: null, session: null,
+  logEntries: [], chatMessages: [], goal: '', ws: null, wsOk: false,
+};
+
+const API = '';  // same origin
+const $ = (s, p) => (p || document).querySelector(s);
+const $$ = (s, p) => [...(p || document).querySelectorAll(s)];
+
+// ── Tab Navigation ─────────────────────────────────────────────────
+$$('#tabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    $$('#tabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    $$('.view').forEach(v => v.classList.remove('active'));
+    $(`#${btn.dataset.view}-view`).classList.add('active');
+    if (btn.dataset.view === 'dashboard') renderDashboard();
+    if (btn.dataset.view === 'tasks') renderTasks();
+    if (btn.dataset.view === 'agents') renderAgents();
+  });
+});
+
+// ── Helpers ────────────────────────────────────────────────────────
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function agentColor(name) {
+  const a = S.agents.find(x => x.name === name);
+  if (a && a.color) return a.color;
+  const colors = ['#FF6B6B','#4ECDC4','#FFEAA7','#F7DC6F','#a29bfe','#fd79a8','#74b9ff'];
+  let h = 0;
+  for (let i = 0; i < (name||'').length; i++) h = (h * 31 + name.charCodeAt(i)) & 0x7fffffff;
+  return colors[h % colors.length];
+}
+
+function roleBadge(name) {
+  const a = S.agents.find(x => x.name === name);
+  const role = a ? a.role : 'worker';
+  const cls = role === 'maestro' ? 'badge-maestro' : role === 'lead' ? 'badge-lead' : 'badge-worker';
+  return `<span class="badge ${cls}">${role}</span>`;
+}
+
+function statusBadge(status) {
+  const s = (status || 'pending').replace(/ /g, '_');
+  return `<span class="status-badge status-${s}">${status}</span>`;
+}
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+// ── API Fetch ──────────────────────────────────────────────────────
+async function api(path) {
+  try {
+    const r = await fetch(API + path);
+    if (!r.ok) return null;
+    return r.json();
+  } catch { return null; }
+}
+
+async function loadAll() {
+  const [goal, log, tasks, agents, config, session] = await Promise.all([
+    api('/api/workspace/goal'),
+    api('/api/workspace/log'),
+    api('/api/tasks'),
+    api('/api/agents'),
+    api('/api/config'),
+    api('/api/session/active'),
+  ]);
+  if (goal) S.goal = goal.content || '';
+  if (log && log.entries) S.logEntries = log.entries;
+  if (tasks) S.tasks = tasks;
+  if (agents) S.agents = agents;
+  if (config) S.config = config;
+  if (session) S.session = session;
+
+  buildChatFromState();
+  renderDashboard();
+  renderTasks();
+  renderAgents();
+  renderConfig();
+  renderMemSidebar();
+}
+
+// ── Chat: Build from state ─────────────────────────────────────────
+function buildChatFromState() {
+  S.chatMessages = [];
+  // Log entries become chat messages
+  for (const e of S.logEntries) {
+    const msg = classifyLogEntry(e);
+    S.chatMessages.push(msg);
+  }
+  // Tasks with handoff reports or plan_ready
+  for (const t of S.tasks) {
+    if (t.handoffReport) {
+      S.chatMessages.push({
+        type: 'handoff', agent: t.assignedTo, ts: t.updatedAt,
+        task: t, report: t.handoffReport,
+      });
+    }
+    if (t.proposedApproach && (t.status === 'plan_ready' || t.status === 'plan_approved')) {
+      S.chatMessages.push({
+        type: 'plan_approval', agent: t.assignedTo, ts: t.updatedAt, task: t,
+      });
+    }
+  }
+  // Sort by timestamp
+  S.chatMessages.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
+  renderChat();
+}
+
+function classifyLogEntry(e) {
+  const m = e.message || '';
+  if (/delegated?\s+\S+\s+to/i.test(m)) {
+    const match = m.match(/delegated?\s+(\S+)\s+to\s+(\S+)/i);
+    const taskId = match ? match[1] : '';
+    const target = match ? match[2] : '';
+    const task = S.tasks.find(t => t.id === taskId);
+    return { type: 'delegation', agent: e.agent, ts: e.timestamp, message: m, taskId, target, task };
+  }
+  if (/status.*(pending|in_progress|complete|failed|plan_ready|plan_approved)/i.test(m)) {
+    const match = m.match(/(pending|in_progress|complete|failed|plan_ready|plan_approved|plan_revision_needed)/i);
+    return { type: 'status_change', agent: e.agent, ts: e.timestamp, message: m, status: match ? match[1] : '' };
+  }
+  if (/reconcil/i.test(m)) {
+    const pass = /pass/i.test(m);
+    return { type: 'reconciliation', agent: e.agent, ts: e.timestamp, message: m, pass };
+  }
+  return { type: 'log', agent: e.agent, ts: e.timestamp, message: m };
+}
+
+// ── Chat: Render ───────────────────────────────────────────────────
+function renderChat() {
+  const feed = $('#chat-feed');
+  feed.innerHTML = '';
+  if (S.chatMessages.length === 0) {
+    feed.innerHTML = '<div style="text-align:center;color:var(--text3);padding:40px;">No messages yet. Waiting for agent activity...</div>';
+    return;
+  }
+  for (const msg of S.chatMessages) {
+    feed.appendChild(makeChatBubble(msg));
+  }
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function makeChatBubble(msg) {
+  const div = document.createElement('div');
+  div.className = 'chat-msg';
+  const name = msg.agent || 'System';
+  const color = agentColor(name);
+  const letter = (name[0] || '?').toUpperCase();
+
+  let body = '';
+  switch (msg.type) {
+    case 'delegation': {
+      const tc = msg.task
+        ? `<div class="task-card"><span class="tc-id">${esc(msg.taskId)}</span> <span class="tc-title">${esc(msg.task.title)}</span></div>`
+        : `<div class="task-card"><span class="tc-id">${esc(msg.taskId)}</span></div>`;
+      body = `<div class="msg-text">${esc(name)} delegated <code>${esc(msg.taskId)}</code> to <strong>${esc(msg.target)}</strong>${tc}</div>`;
+      break;
+    }
+    case 'status_change':
+      body = `<div class="msg-text">${esc(msg.message)}<br>${statusBadge(msg.status)}</div>`;
+      break;
+    case 'handoff': {
+      const r = msg.report;
+      body = `<div class="msg-text">Handoff report for <code>${esc(msg.task.id)}</code></div>
+        <details class="handoff-card"><summary>Handoff Report</summary>
+          <div class="hc-section"><h4>Changes Made</h4><p>${esc(r.changesMade)}</p></div>
+          <div class="hc-section"><h4>Patterns Followed</h4><p>${esc(r.patternsFollowed)}</p></div>
+          <div class="hc-section"><h4>Unresolved Concerns</h4><p>${esc(r.unresolvedConcerns)}</p></div>
+          <div class="hc-section"><h4>Suggested Follow-ups</h4><p>${esc(r.suggestedFollowups)}</p></div>
+        </details>`;
+      break;
+    }
+    case 'plan_approval': {
+      const t = msg.task;
+      const btns = t.status === 'plan_ready'
+        ? `<div class="action-btns">
+            <button class="btn btn-approve" onclick="maestro.approvePlan('${esc(t.id)}')">Approve</button>
+            <button class="btn btn-revise" onclick="maestro.revisePlan('${esc(t.id)}')">Revise</button>
+          </div>`
+        : `<div class="msg-text" style="color:var(--complete);">Plan approved</div>`;
+      body = `<div class="msg-text">Proposed approach for <code>${esc(t.id)}</code>:</div>
+        <div class="task-card" style="border-left-color:var(--plan_ready);">${esc(t.proposedApproach)}</div>${btns}`;
+      break;
+    }
+    case 'reconciliation':
+      body = `<div class="msg-text"><span class="${msg.pass ? 'recon-pass' : 'recon-fail'}">${msg.pass ? 'PASS' : 'FAIL'}</span> ${esc(msg.message)}</div>`;
+      break;
+    default:
+      body = `<div class="msg-text">${esc(msg.message)}</div>`;
+  }
+
+  div.innerHTML = `
+    <div class="avatar" style="background:${color}">${letter}</div>
+    <div class="msg-body">
+      <div class="msg-header">
+        <span class="name">${esc(name)}</span>${roleBadge(name)}
+        <span class="ts">${fmtTime(msg.ts)}</span>
+      </div>${body}
+    </div>`;
+  return div;
+}
+
+function appendChatMessage(msg) {
+  S.chatMessages.push(msg);
+  const feed = $('#chat-feed');
+  const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 60;
+  feed.appendChild(makeChatBubble(msg));
+  if (atBottom) feed.scrollTop = feed.scrollHeight;
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────
+function renderDashboard() {
+  const g = $('#dash-grid');
+  const s = S.session || {};
+  const counts = {};
+  for (const t of S.tasks) counts[t.status] = (counts[t.status] || 0) + 1;
+  const countHtml = Object.entries(counts).map(([k, v]) => `${statusBadge(k)} <strong>${v}</strong>`).join('  ');
+
+  g.innerHTML = `
+    <div class="card"><h3>Session</h3>
+      <div class="big">${s.status || 'none'}</div>
+      <p style="color:var(--text2);font-size:12px;margin-top:6px;">
+        ${s.goal ? esc(s.goal).substring(0, 120) : 'No active session'}
+      </p>
+      ${s.currentWave != null ? `<p style="margin-top:4px;font-size:12px;color:var(--text3);">Wave: ${s.currentWave}</p>` : ''}
+    </div>
+    <div class="card"><h3>Workers</h3>
+      <div class="big">${s.activeWorkerCount || 0}</div>
+    </div>
+    <div class="card"><h3>Tasks (${S.tasks.length})</h3>
+      <div style="margin-top:6px;">${countHtml || '<span style="color:var(--text3)">No tasks</span>'}</div>
+    </div>
+    <div class="card" style="grid-column: 1/-1;"><h3>Recent Log</h3>
+      <div class="log-list">${S.logEntries.slice(-30).reverse().map(e =>
+        `<div class="log-item"><span class="lt">${fmtTime(e.timestamp)}</span><span class="la">${esc(e.agent)}</span><span>${esc(e.message)}</span></div>`
+      ).join('')}</div>
+    </div>`;
+}
+
+// ── Tasks ──────────────────────────────────────────────────────────
+function renderTasks() {
+  renderTaskFilters();
+  renderTaskTable();
+}
+
+function renderTaskFilters() {
+  const waves = [...new Set(S.tasks.map(t => t.wave))].sort();
+  const statuses = [...new Set(S.tasks.map(t => t.status))].sort();
+  const f = $('#task-filters');
+  f.innerHTML = `
+    <select id="f-wave"><option value="">All Waves</option>${waves.map(w => `<option value="${w}">Wave ${w}</option>`).join('')}</select>
+    <select id="f-status"><option value="">All Statuses</option>${statuses.map(s => `<option value="${s}">${s}</option>`).join('')}</select>`;
+  $('#f-wave').addEventListener('change', renderTaskTable);
+  $('#f-status').addEventListener('change', renderTaskTable);
+}
+
+function renderTaskTable() {
+  const wf = ($('#f-wave') || {}).value;
+  const sf = ($('#f-status') || {}).value;
+  let tasks = S.tasks;
+  if (wf) tasks = tasks.filter(t => String(t.wave) === wf);
+  if (sf) tasks = tasks.filter(t => t.status === sf);
+
+  const tbody = $('#task-tbody');
+  tbody.innerHTML = tasks.map(t => `
+    <tr data-id="${esc(t.id)}">
+      <td><code>${esc(t.id)}</code></td><td>${esc(t.title)}</td>
+      <td>${esc(t.assignedTo)}</td><td>${t.wave}</td>
+      <td>${statusBadge(t.status)}</td><td>${esc(t.phase)}</td>
+    </tr>`).join('');
+
+  $$('#task-tbody tr').forEach(row => {
+    row.addEventListener('click', () => {
+      const existing = row.nextElementSibling;
+      if (existing && existing.classList.contains('task-detail-row')) {
+        existing.remove();
+        return;
+      }
+      const t = S.tasks.find(x => x.id === row.dataset.id);
+      if (!t) return;
+      const tr = document.createElement('tr');
+      tr.className = 'task-detail-row';
+      tr.innerHTML = `<td colspan="6"><div class="task-detail">
+        <p><strong>Description:</strong> ${esc(t.description)}</p>
+        <p><strong>Dependencies:</strong> ${t.dependencies && t.dependencies.length ? t.dependencies.join(', ') : 'none'}</p>
+        <p><strong>Parent:</strong> ${t.parentTask || 'none'}</p>
+        <p><strong>Plan First:</strong> ${t.planFirst}</p>
+        ${t.proposedApproach ? `<p><strong>Proposed Approach:</strong> ${esc(t.proposedApproach)}</p>` : ''}
+        ${t.handoffReport ? `<p><strong>Handoff:</strong> ${esc(t.handoffReport.changesMade)}</p>` : ''}
+      </div></td>`;
+      row.after(tr);
+    });
+  });
+}
+
+// ── Agents ─────────────────────────────────────────────────────────
+function renderAgents() {
+  const c = $('#agents-container');
+  if (!S.agents.length) { c.innerHTML = '<p style="color:var(--text3)">No agents loaded.</p>'; return; }
+
+  // Group by level for hierarchy
+  const byLevel = {};
+  for (const a of S.agents) {
+    const lvl = a.level || 3;
+    (byLevel[lvl] = byLevel[lvl] || []).push(a);
+  }
+
+  let html = '';
+  for (const level of [1, 2, 3]) {
+    const group = byLevel[level];
+    if (!group) continue;
+    const indent = level > 1 ? ' hierarchy-indent' : '';
+    html += `<h3 style="margin:12px 0 8px;color:var(--text3);font-size:12px;text-transform:uppercase;">Level ${level}${level === 1 ? ' (Maestro)' : level === 2 ? ' (Leads)' : ' (Workers)'}</h3>`;
+    html += `<div class="agent-grid${indent}">`;
+    for (const a of group) {
+      const color = a.color || agentColor(a.name);
+      const skills = (a.skills || []).map(s => `<span class="skill-tag">${esc(s)}</span>`).join('');
+      html += `<div class="agent-card" style="border-left-color:${color}">
+        <h3>${esc(a.name)}</h3>
+        <div class="meta">${roleBadge(a.name)} <span style="color:var(--text3)">${esc(a.model || '')}</span>
+          ${a.team ? ` &middot; <span style="color:${color}">${esc(a.team)}</span>` : ''}</div>
+        ${skills ? `<div class="skills">${skills}</div>` : ''}
+      </div>`;
+    }
+    html += '</div>';
+  }
+  c.innerHTML = html;
+}
+
+// ── Memory ─────────────────────────────────────────────────────────
+const MEM_DIRS = ['sessions', 'daily', 'agents', 'knowledge-graph'];
+function renderMemSidebar() {
+  const sb = $('#mem-sidebar');
+  sb.innerHTML = MEM_DIRS.map(d => `<button data-dir="${d}">${d}/</button>`).join('');
+  $$('#mem-sidebar button').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      $$('#mem-sidebar button').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      // Memory files not exposed via API yet, show placeholder
+      $('#mem-content').textContent = `[${btn.dataset.dir}/] Memory browsing requires /api/memory endpoint.\nFiles in .agent-maestro/memory/${btn.dataset.dir}/ would appear here.`;
+    });
+  });
+}
+
+// ── Config ─────────────────────────────────────────────────────────
+function renderConfig() {
+  const el = $('#config-display');
+  if (S.config) {
+    el.textContent = JSON.stringify(S.config, null, 2);
+  } else {
+    el.textContent = 'Failed to load configuration.';
+  }
+}
+
+// ── WebSocket ──────────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = `${proto}://${location.host}`;
+  const ws = new WebSocket(url);
+  S.ws = ws;
+
+  ws.onopen = () => {
+    S.wsOk = true;
+    $('#ws-dot').className = 'ws-dot on';
+    $('#ws-label').textContent = 'connected';
+  };
+
+  ws.onclose = () => {
+    S.wsOk = false;
+    $('#ws-dot').className = 'ws-dot off';
+    $('#ws-label').textContent = 'disconnected';
+    setTimeout(connectWS, 3000);
+  };
+
+  ws.onerror = () => ws.close();
+
+  ws.onmessage = (e) => {
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+    handleWSEvent(data);
+  };
+}
+
+function handleWSEvent(data) {
+  switch (data.type) {
+    case 'file:changed':
+      handleFileChange(data);
+      break;
+    case 'log:entry':
+      handleLogEntry(data);
+      break;
+    case 'pane:output':
+      // Could display terminal output; for now just ignore
+      break;
+  }
+}
+
+async function handleFileChange(data) {
+  const p = data.path || '';
+  // Reload relevant data based on what changed
+  if (p.includes('task')) {
+    const tasks = await api('/api/tasks');
+    if (tasks) {
+      const oldStatuses = {};
+      for (const t of S.tasks) oldStatuses[t.id] = t.status;
+      S.tasks = tasks;
+      // Detect status changes
+      for (const t of tasks) {
+        if (oldStatuses[t.id] && oldStatuses[t.id] !== t.status) {
+          appendChatMessage({
+            type: 'status_change', agent: t.assignedTo || 'System',
+            ts: t.updatedAt, message: `${t.id} status: ${oldStatuses[t.id]} -> ${t.status}`,
+            status: t.status,
+          });
+        }
+        // New handoff
+        if (t.handoffReport && !S.chatMessages.find(m => m.type === 'handoff' && m.task && m.task.id === t.id)) {
+          appendChatMessage({
+            type: 'handoff', agent: t.assignedTo, ts: t.updatedAt,
+            task: t, report: t.handoffReport,
+          });
+        }
+        // New plan approval needed
+        if (t.proposedApproach && t.status === 'plan_ready' &&
+            !S.chatMessages.find(m => m.type === 'plan_approval' && m.task && m.task.id === t.id)) {
+          appendChatMessage({
+            type: 'plan_approval', agent: t.assignedTo, ts: t.updatedAt, task: t,
+          });
+        }
+      }
+      renderTasks();
+    }
+  }
+  if (p.includes('log')) {
+    const log = await api('/api/workspace/log');
+    if (log && log.entries) {
+      const oldLen = S.logEntries.length;
+      S.logEntries = log.entries;
+      // Append new entries to chat
+      for (let i = oldLen; i < log.entries.length; i++) {
+        appendChatMessage(classifyLogEntry(log.entries[i]));
+      }
+    }
+  }
+  if (p.includes('goal') || p.includes('status')) {
+    const [goal, session] = await Promise.all([api('/api/workspace/goal'), api('/api/session/active')]);
+    if (goal) S.goal = goal.content || '';
+    if (session) S.session = session;
+  }
+  renderDashboard();
+}
+
+function handleLogEntry(data) {
+  const entry = { timestamp: data.timestamp, agent: data.agent, message: data.message };
+  S.logEntries.push(entry);
+  appendChatMessage(classifyLogEntry(entry));
+  renderDashboard();
+}
+
+// ── Actions ────────────────────────────────────────────────────────
+window.maestro = {
+  async approvePlan(taskId) {
+    const r = await fetch(API + '/api/actions/approve-plan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId }),
+    });
+    if (r.ok) {
+      const data = await r.json();
+      // Update local state
+      const idx = S.tasks.findIndex(t => t.id === taskId);
+      if (idx >= 0 && data.task) S.tasks[idx] = data.task;
+      buildChatFromState();
+      renderTasks();
+    } else {
+      const err = await r.json().catch(() => ({}));
+      alert('Approve failed: ' + (err.error || r.statusText));
+    }
+  },
+
+  async revisePlan(taskId) {
+    const feedback = prompt('Enter revision feedback:');
+    if (!feedback) return;
+    const r = await fetch(API + '/api/actions/revise-plan', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ taskId, feedback }),
+    });
+    if (r.ok) {
+      const tasks = await api('/api/tasks');
+      if (tasks) S.tasks = tasks;
+      buildChatFromState();
+      renderTasks();
+    } else {
+      const err = await r.json().catch(() => ({}));
+      alert('Revise failed: ' + (err.error || r.statusText));
+    }
+  },
+};
+
+// ── Init ───────────────────────────────────────────────────────────
+loadAll();
+connectWS();
+})();
+</script>
+</body>
+</html>
