@@ -1,0 +1,87 @@
+schema_version: 1
+project_name: agent-maestro
+
+paths:
+  workspace: workspace
+  agents: agents
+  skills: skills
+  memory: memory
+  logs: logs
+  shared_context: shared-context
+
+maestro:
+  name: Maestro
+  file: maestro.md
+  color: "#FF6B6B"
+
+teams:
+  - name: Planning
+    lead:
+      name: Planning Lead
+      file: leads/planning-lead.md
+      color: "#4ECDC4"
+    workers:
+      - name: Product Manager
+        file: workers/product-manager.md
+        color: "#45B7D1"
+      - name: UX Researcher
+        file: workers/ux-researcher.md
+        color: "#96CEB4"
+
+  - name: Engineering
+    lead:
+      name: Engineering Lead
+      file: leads/engineering-lead.md
+      color: "#FFEAA7"
+    workers:
+      - name: Frontend Dev
+        file: workers/frontend-dev.md
+        color: "#DDA0DD"
+      - name: Backend Dev
+        file: workers/backend-dev.md
+        color: "#98D8C8"
+
+  - name: Validation
+    lead:
+      name: Validation Lead
+      file: leads/validation-lead.md
+      color: "#F7DC6F"
+    workers:
+      - name: QA Engineer
+        file: workers/qa-engineer.md
+        color: "#BB8FCE"
+      - name: Security Reviewer
+        file: workers/security-reviewer.md
+        color: "#F1948A"
+
+model_tier_policy:
+  curator:
+    primary: "anthropic/claude-opus-4-6"
+    fallback: "google/gemini-2.5-pro"
+  lead:
+    primary: "anthropic/claude-opus-4-6"
+    fallback: "google/gemini-2.5-pro"
+  worker:
+    primary: "anthropic/claude-sonnet-4-6"
+    fallback: "google/gemini-2.5-flash"
+
+memory:
+  session_retention_days: 7
+  daily_retention_days: 30
+  expertise_token_budget: 3000
+  knowledge_graph_token_budget: 2000
+  compaction_threshold: 0.8
+  compaction_interval_days: 7
+  low_confidence_threshold: 0.3
+
+limits:
+  max_panes: 10
+  max_delegation_depth: 5
+  stall_timeout_seconds: 120
+  task_timeout_seconds: 600
+  wave_timeout_seconds: 1800
+  max_reconcile_retries: 3
+  max_retry_attempts: 3
+  escalate_after_seconds: 300
+
+tmux_session: agent-maestro
