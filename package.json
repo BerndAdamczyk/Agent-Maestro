@@ -1,0 +1,13 @@
+{
+  "name": "agent-maestro-docs",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Docs-as-code pipeline for Agent Orchestrator architecture documentation",
+  "scripts": {
+    "build": "node scripts/build-docs.mjs",
+    "dev": "node scripts/build-docs.mjs --watch"
+  },
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "^11.4.2"
+  }
+}
