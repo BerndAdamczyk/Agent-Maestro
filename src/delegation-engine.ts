@@ -6,12 +6,17 @@
  * tracks active workers. Enforces spawn budget and delegation depth limits.
  */
 
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { v4 as uuid } from "uuid";
 import type {
   SystemConfig,
   ActiveWorker,
   DelegationParams,
   AgentDefinition,
+  PersistedActiveWorker,
+  RuntimePolicyManifest,
+  TaskPhase,
 } from "./types.js";
 import type { AgentResolver } from "./config.js";
 import type { PromptAssembler } from "./prompt-assembler.js";
@@ -21,6 +26,7 @@ import type { MemorySubsystem } from "./memory/index.js";
 import { hasPiModelCredentials } from "./pi-runtime-support.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { RuntimePolicyManager } from "./runtime/policy.js";
+import { atomicWrite } from "./utils.js";
 
 export interface DelegationQueue {
   params: DelegationParams;
@@ -39,6 +45,7 @@ export class DelegationEngine {
   private policyManager: RuntimePolicyManager;
   private activeWorkers = new Map<string, ActiveWorker>();
   private delegationQueue: DelegationQueue[] = [];
+  private activeWorkerStatePath: string;
 
   constructor(
     rootDir: string,
@@ -59,6 +66,8 @@ export class DelegationEngine {
     this.logger = logger;
     this.memory = memory;
     this.policyManager = new RuntimePolicyManager(rootDir, config);
+    this.activeWorkerStatePath = join(rootDir, config.paths.workspace, "runtime-state", "active-workers.json");
+    mkdirSync(join(rootDir, config.paths.workspace, "runtime-state"), { recursive: true });
   }
 
   /**
@@ -146,6 +155,7 @@ export class DelegationEngine {
     const runtimeHandle = this.runtime.launch({
       agentName: params.agentName,
       taskId: task.id,
+      correlationId: task.correlationId,
       role,
       phase: task.phase,
       model,
@@ -155,7 +165,7 @@ export class DelegationEngine {
       sessionFilePath: policy.sessionFilePath,
       policyManifestPath: this.policyManager.getPolicyManifestPath(task.id),
       workspaceRoot: this.rootDir,
-      allowedTools,
+      allowedTools: policy.allowedTools,
       timeoutMs: params.timeBudget * 1000,
       env: {
         MAESTRO_TASK_ID: task.id,
@@ -185,6 +195,7 @@ export class DelegationEngine {
     };
 
     this.activeWorkers.set(task.id, worker);
+    this.persistActiveWorkers();
 
     this.logger.logEntry(
       "Maestro",
@@ -221,6 +232,7 @@ export class DelegationEngine {
 
     this.runtime.destroy(worker.runtimeHandle);
     this.activeWorkers.delete(taskId);
+    this.persistActiveWorkers();
 
     const verb = outcome === "complete"
       ? "completed"
@@ -244,9 +256,9 @@ export class DelegationEngine {
   private pickLaunchModel(agent: AgentDefinition): string {
     const tierPolicy = this.config.model_tier_policy[agent.frontmatter.model_tier];
     const candidates = [
-      agent.frontmatter.model,
       tierPolicy.primary,
       tierPolicy.fallback,
+      agent.frontmatter.model,
     ];
     const uniqueCandidates = [...new Set(candidates.filter(Boolean))];
 
@@ -265,6 +277,35 @@ export class DelegationEngine {
     return selected;
   }
 
+  getPersistedActiveWorkers(): PersistedActiveWorker[] {
+    if (!existsSync(this.activeWorkerStatePath)) {
+      return [];
+    }
+
+    try {
+      return JSON.parse(readFileSync(this.activeWorkerStatePath, "utf-8")) as PersistedActiveWorker[];
+    } catch {
+      return [];
+    }
+  }
+
+  destroyAllActiveWorkers(reason: string): void {
+    for (const [taskId, worker] of this.activeWorkers) {
+      this.logger.logEntry("Maestro", `Destroying active worker during shutdown: ${taskId} (${worker.agentName}) -- ${reason}`, {
+        level: "warn",
+        taskId,
+        correlationId: worker.correlationId,
+      });
+      this.runtime.destroy(worker.runtimeHandle);
+      this.activeWorkers.delete(taskId);
+    }
+    this.persistActiveWorkers();
+  }
+
+  clearPersistedActiveWorkers(): void {
+    atomicWrite(this.activeWorkerStatePath, JSON.stringify([], null, 2));
+  }
+
   getActiveWorkers(): Map<string, ActiveWorker> {
     return this.activeWorkers;
   }
@@ -273,7 +314,64 @@ export class DelegationEngine {
     return this.activeWorkers.get(taskId);
   }
 
+  refreshWorkerRuntimeContext(taskId: string, phase: TaskPhase): RuntimePolicyManifest | null {
+    const worker = this.activeWorkers.get(taskId);
+    if (!worker) return null;
+
+    const task = this.taskManager.readTask(taskId);
+    if (!task) return null;
+
+    const agent = this.agentResolver.findAgentByName(worker.agentName);
+    if (!agent) return null;
+
+    this.promptAssembler.assemble(agent, {
+      agentName: worker.agentName,
+      taskId: task.id,
+      taskTitle: task.title,
+      taskDescription: task.description,
+      taskType: task.taskType,
+      acceptanceCriteria: task.acceptanceCriteria,
+      phase,
+      wave: task.wave,
+      dependencies: task.dependencies,
+      planFirst: task.planFirst,
+      timeBudget: task.timeBudget,
+      parentTaskId: task.parentTask,
+      delegationDepth: Math.max(0, worker.hierarchyLevel - 1),
+    });
+
+    const allowedTools = this.getAllowedTools(agent);
+    return this.policyManager.build({
+      taskId: task.id,
+      agentName: worker.agentName,
+      role: worker.role,
+      phase,
+      taskFilePath: this.taskManager.getTaskFilePath(task.id),
+      allowedTools,
+      domain: agent.frontmatter.domain,
+      taskWriteScope: task.writeScope,
+    });
+  }
+
   getQueueLength(): number {
     return this.delegationQueue.length;
+  }
+
+  private persistActiveWorkers(): void {
+    const persisted: PersistedActiveWorker[] = [...this.activeWorkers.values()].map(worker => ({
+      instanceId: worker.instanceId,
+      agentName: worker.agentName,
+      runtimeId: worker.runtimeId,
+      runtimeType: worker.runtimeType,
+      taskId: worker.taskId,
+      correlationId: worker.correlationId,
+      role: worker.role,
+      hierarchyLevel: worker.hierarchyLevel,
+      startedAt: worker.startedAt.toISOString(),
+      lastOutputAt: worker.lastOutputAt.toISOString(),
+      parentTaskId: worker.parentTaskId,
+    }));
+
+    atomicWrite(this.activeWorkerStatePath, JSON.stringify(persisted, null, 2));
   }
 }

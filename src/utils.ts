@@ -15,6 +15,39 @@ export function atomicWrite(filePath: string, content: string): void {
   renameSync(tmp, filePath);
 }
 
+export function upsertMarkdownSection(content: string, heading: string, entryBlock: string): string {
+  const normalizedEntry = entryBlock.trimEnd();
+  const sectionRe = new RegExp(`(^## ${escapeRegExp(heading)}\\n)([\\s\\S]*?)(?=\\n## |$)`, "m");
+  const match = content.match(sectionRe);
+
+  if (!match || match.index === undefined) {
+    const base = content.trimEnd();
+    return `${base}\n\n## ${heading}\n\n${normalizedEntry}\n`;
+  }
+
+  const sectionStart = match.index;
+  const fullMatch = match[0];
+  const header = match[1] ?? `## ${heading}\n`;
+  const body = (match[2] ?? "").trimEnd();
+  const replacement = `${header}\n${body ? `${body}\n` : ""}${normalizedEntry}\n`;
+  return `${content.slice(0, sectionStart)}${replacement}${content.slice(sectionStart + fullMatch.length)}`;
+}
+
+export function setMarkdownFrontmatterValue(content: string, key: string, value: string): string {
+  const frontmatterRe = /^---\n([\s\S]*?)\n---\n?/;
+  const match = content.match(frontmatterRe);
+  if (!match) return content;
+
+  const frontmatter = match[1] ?? "";
+  const entryRe = new RegExp(`^${escapeRegExp(key)}:\s*.*$`, "m");
+  const serializedValue = /^(?:"|\[|\{|\d|true|false|null)/.test(value) ? value : JSON.stringify(value);
+  const nextFrontmatter = entryRe.test(frontmatter)
+    ? frontmatter.replace(entryRe, `${key}: ${serializedValue}`)
+    : `${frontmatter}\n${key}: ${serializedValue}`;
+
+  return content.replace(frontmatterRe, `---\n${nextFrontmatter}\n---\n`);
+}
+
 export function formatTimestamp(
   date: Date = new Date(),
   options: { includeMilliseconds?: boolean } = {},
@@ -61,4 +94,8 @@ export function sanitizeForShell(input: string): string {
 
 function padNumber(value: number, width: number = 2): string {
   return String(value).padStart(width, "0");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

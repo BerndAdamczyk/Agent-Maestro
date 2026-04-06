@@ -159,6 +159,7 @@ async function main() {
 
   if (isResume) {
     logger.logEntry("Maestro", "Resuming session from workspace state", { level: "info" });
+    recoverPersistedWorkers(taskManager, delegationEngine, runtime, logger, memory);
     const tasks = taskManager.getAllTasks();
     const maxWave = Math.max(0, ...tasks.map(t => t.wave));
     const completedWaves = new Set<number>();
@@ -217,11 +218,10 @@ async function main() {
     consumeRuntimeControlSignals(
       workers,
       taskManager,
+      delegationEngine,
       runtime,
       logger,
       memory,
-      agentResolver,
-      promptAssembler,
     );
     const results = monitorEngine.monitorAll(workers);
 
@@ -244,7 +244,7 @@ async function main() {
           runtime.interrupt(worker.runtimeHandle, `Task timeout exceeded (${task.timeBudget}s)`);
           taskManager.updateStatus(result.taskId, "failed");
           appendSessionEvent(memory, result.taskId, `Task timed out after ${Math.round(elapsedSeconds)}s.`);
-          promoteTaskMemory(memory, task, worker.agentName, "failed");
+          promoteTaskMemory(memory, agentResolver, task, worker.agentName, "failed");
           logger.logEntry("Monitor", `Task timeout for ${result.taskId} after ${Math.round(elapsedSeconds)}s`, {
             level: "error",
             taskId: result.taskId,
@@ -316,7 +316,7 @@ async function main() {
       if (result.taskStatus === "complete" || result.taskStatus === "failed") {
         if (task && worker) {
           appendSessionEvent(memory, result.taskId, `Task reached terminal status: ${result.taskStatus}.`);
-          promoteTaskMemory(memory, task, worker.agentName, result.taskStatus);
+          promoteTaskMemory(memory, agentResolver, task, worker.agentName, result.taskStatus);
         }
         delegationEngine.completeWorker(result.taskId, result.taskStatus);
         monitorEngine.clearCache(result.taskId);
@@ -374,7 +374,7 @@ async function main() {
             result.taskId,
             `Worker exhausted ${config.limits.max_retry_attempts} non-terminal continuation retries; task marked failed.`,
           );
-          promoteTaskMemory(memory, task, worker.agentName, "failed");
+          promoteTaskMemory(memory, agentResolver, task, worker.agentName, "failed");
           taskManager.updateStatus(result.taskId, "failed");
           checkpointMemory(memory, `${result.taskId} failed`);
           delegationEngine.completeWorker(result.taskId, "failed");
@@ -399,7 +399,7 @@ async function main() {
         });
         if (task && worker) {
           appendSessionEvent(memory, result.taskId, "Runtime disappeared unexpectedly; task marked failed.");
-          promoteTaskMemory(memory, task, worker.agentName, "failed");
+          promoteTaskMemory(memory, agentResolver, task, worker.agentName, "failed");
         }
         taskManager.updateStatus(result.taskId, "failed");
         checkpointMemory(memory, `${result.taskId} failed`);
@@ -423,7 +423,7 @@ async function main() {
       );
       taskManager.updateStatus(worker.taskId, "failed");
       appendSessionEvent(memory, worker.taskId, "Stall escalation threshold exceeded; task marked failed.");
-      promoteTaskMemory(memory, task, worker.agentName, "failed");
+      promoteTaskMemory(memory, agentResolver, task, worker.agentName, "failed");
       logger.logEntry("Monitor", `Escalated stalled task ${worker.taskId} to failure`, {
         level: "error",
         taskId: worker.taskId,
@@ -456,6 +456,7 @@ async function main() {
     if (session.status === "active") {
       session.status = exitCode === 0 ? "completed" : "failed";
     }
+    delegationEngine.destroyAllActiveWorkers("session shutdown");
     logger.logEntry("Maestro", "Session ended", { level: "info" });
     statusManager.refresh();
 
@@ -506,22 +507,23 @@ main().catch(err => {
 function consumeRuntimeControlSignals(
   workers: Map<string, ActiveWorker>,
   taskManager: TaskManager,
+  delegationEngine: DelegationEngine,
   runtime: AgentRuntime,
   logger: Logger,
   memory: MemorySubsystem,
-  agentResolver: AgentResolver,
-  promptAssembler: PromptAssembler,
 ): void {
   for (const [taskId, worker] of workers) {
     const task = taskManager.readTask(taskId);
     if (!task) continue;
 
     if (task.status === "plan_approved") {
-      refreshRuntimePrompt(task, worker.agentName, agentResolver, promptAssembler);
+      const runtimeContext = delegationEngine.refreshWorkerRuntimeContext(taskId, "phase_2_execute");
+      if (!runtimeContext) continue;
       appendSessionEvent(memory, taskId, "Plan approved by lead; resuming execution phase.");
       runtime.resume(worker.runtimeHandle, {
         phase: "phase_2_execute",
         message: "The proposed approach is approved. Proceed to implementation and complete the task.",
+        allowedTools: runtimeContext.allowedTools,
       });
       taskManager.updateStatus(taskId, "in_progress");
       logger.logEntry("Monitor", `Consumed plan_approved for ${taskId}; resumed ${worker.agentName} in phase_2_execute`, {
@@ -532,7 +534,8 @@ function consumeRuntimeControlSignals(
     }
 
     if (task.status === "plan_revision_needed") {
-      refreshRuntimePrompt(task, worker.agentName, agentResolver, promptAssembler);
+      const runtimeContext = delegationEngine.refreshWorkerRuntimeContext(taskId, "phase_1_plan");
+      if (!runtimeContext) continue;
       appendSessionEvent(memory, taskId, `Plan revision requested: ${task.revisionFeedback ?? "No explicit feedback provided."}`);
       runtime.resume(worker.runtimeHandle, {
         phase: "phase_1_plan",
@@ -541,6 +544,7 @@ function consumeRuntimeControlSignals(
           task.revisionFeedback ?? "No explicit feedback provided.",
           "Do not implement yet. Update the Proposed Approach section and set status to plan_ready again.",
         ].join("\n"),
+        allowedTools: runtimeContext.allowedTools,
       });
       taskManager.updateStatus(taskId, "in_progress");
       logger.logEntry("Monitor", `Consumed plan_revision_needed for ${taskId}; resumed ${worker.agentName} in phase_1_plan`, {
@@ -552,32 +556,6 @@ function consumeRuntimeControlSignals(
   }
 }
 
-function refreshRuntimePrompt(
-  task: ParsedTask,
-  agentName: string,
-  agentResolver: AgentResolver,
-  promptAssembler: PromptAssembler,
-): void {
-  const agent = agentResolver.findAgentByName(agentName);
-  if (!agent) return;
-
-  promptAssembler.assemble(agent, {
-    agentName,
-    taskId: task.id,
-    taskTitle: task.title,
-    taskDescription: task.description,
-    taskType: task.taskType,
-    acceptanceCriteria: task.acceptanceCriteria,
-    phase: task.phase,
-    wave: task.wave,
-    dependencies: task.dependencies,
-    planFirst: task.planFirst,
-    timeBudget: task.timeBudget,
-    parentTaskId: task.parentTask,
-    delegationDepth: Math.max(0, agentResolver.getAgentHierarchyLevel(agentName) - 1),
-  });
-}
-
 function appendSessionEvent(memory: MemorySubsystem, taskId: string, content: string): void {
   memory.sessionDAG.append(taskId, {
     role: "system",
@@ -587,13 +565,69 @@ function appendSessionEvent(memory: MemorySubsystem, taskId: string, content: st
 
 function promoteTaskMemory(
   memory: MemorySubsystem,
+  agentResolver: AgentResolver,
   task: ParsedTask,
   agentName: string,
   outcome: "complete" | "failed",
 ): void {
   const entries = buildDailyProtocolEntries(task, agentName, outcome);
-  if (entries.length === 0) return;
-  memory.dailyProtocol.flush(entries);
+  if (entries.length > 0) {
+    memory.dailyProtocol.flush(entries);
+  }
+
+  promoteExpertiseMemory(memory, agentResolver, task, agentName, outcome);
+}
+
+function promoteExpertiseMemory(
+  memory: MemorySubsystem,
+  agentResolver: AgentResolver,
+  task: ParsedTask,
+  agentName: string,
+  outcome: "complete" | "failed",
+): void {
+  const agent = agentResolver.findAgentByName(agentName);
+  if (!agent) return;
+  if (!agent.frontmatter.memory.write_levels.includes(3)) return;
+
+  const date = new Date().toISOString().slice(0, 10);
+  const source = task.id;
+
+  if (task.handoffReport?.patternsFollowed) {
+    memory.expertise.appendToMemory(agentName, agent.frontmatter, "Patterns Learned", {
+      content: task.handoffReport.patternsFollowed,
+      confidence: outcome === "complete" ? 0.82 : 0.65,
+      source,
+      date,
+    });
+  }
+
+  if (task.handoffReport?.suggestedFollowups && !isExplicitNone(task.handoffReport.suggestedFollowups)) {
+    memory.expertise.appendToMemory(agentName, agent.frontmatter, "Collaborations", {
+      content: task.handoffReport.suggestedFollowups,
+      confidence: 0.72,
+      source,
+      date,
+    });
+  }
+
+  if (task.handoffReport?.unresolvedConcerns && !isExplicitNone(task.handoffReport.unresolvedConcerns)) {
+    memory.expertise.appendToMemory(agentName, agent.frontmatter, "Mistakes to Avoid", {
+      content: task.handoffReport.unresolvedConcerns,
+      confidence: 0.78,
+      source,
+      date,
+    });
+  }
+
+  const domain = agent.frontmatter.memory.domain_lock;
+  if (domain && task.handoffReport?.changesMade) {
+    memory.expertise.appendToExpert(agentName, agent.frontmatter, domain, "Architecture Patterns", {
+      content: task.handoffReport.changesMade,
+      confidence: outcome === "complete" ? 0.76 : 0.6,
+      source,
+      date,
+    });
+  }
 }
 
 function buildDailyProtocolEntries(
@@ -678,4 +712,62 @@ function checkpointMemory(memory: MemorySubsystem, message: string): void {
 
 function isExplicitNone(value: string): boolean {
   return /^(?:none|none noted|no follow-?ups|no unresolved concerns|n\/a)$/i.test(value.trim());
+}
+
+function recoverPersistedWorkers(
+  taskManager: TaskManager,
+  delegationEngine: DelegationEngine,
+  runtime: AgentRuntime,
+  logger: Logger,
+  memory: MemorySubsystem,
+): void {
+  for (const persisted of delegationEngine.getPersistedActiveWorkers()) {
+    const task = taskManager.readTask(persisted.taskId);
+    if (!task) continue;
+    if (task.status === "complete" || task.status === "failed") continue;
+
+    runtime.destroy({
+      id: persisted.runtimeId,
+      runtimeType: persisted.runtimeType,
+      agentName: persisted.agentName,
+      taskId: persisted.taskId,
+      launchedAt: persisted.startedAt,
+    });
+    logger.logEntry(
+      "Resume",
+      `Requested teardown of persisted ${persisted.runtimeType} runtime ${persisted.runtimeId} before failing ${persisted.taskId}`,
+      {
+        level: "warn",
+        taskId: persisted.taskId,
+        correlationId: persisted.correlationId,
+      },
+    );
+    taskManager.setRevisionFeedback(
+      persisted.taskId,
+      [
+        `Resume detected a previously active ${persisted.runtimeType} worker (${persisted.runtimeId}) for ${persisted.agentName}.`,
+        "Automatic runtime-handle reconstruction is not available yet, so the task was failed to prevent duplicate relaunch.",
+        "Review the task file, logs, and runtime session artifacts before re-queueing the work.",
+      ].join(" "),
+    );
+    taskManager.updateStatus(persisted.taskId, "failed");
+    if (!memory.sessionDAG.sessionExists(persisted.taskId)) {
+      memory.sessionDAG.createSession(persisted.taskId);
+    }
+    memory.sessionDAG.append(persisted.taskId, {
+      role: "system",
+      content: `Resume safety check failed task ${persisted.taskId} to avoid duplicate relaunch of runtime ${persisted.runtimeId}.`,
+    });
+    logger.logEntry(
+      "Resume",
+      `Marked ${persisted.taskId} as failed during resume because runtime reconstruction is unavailable for persisted worker ${persisted.runtimeId}`,
+      {
+        level: "warn",
+        taskId: persisted.taskId,
+        correlationId: persisted.correlationId,
+      },
+    );
+  }
+
+  delegationEngine.clearPersistedActiveWorkers();
 }

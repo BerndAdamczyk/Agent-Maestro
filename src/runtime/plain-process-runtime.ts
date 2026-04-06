@@ -30,6 +30,7 @@ interface ProcessState {
   env: Record<string, string>;
   turnNumber: number;
   pendingResume: AgentRuntimeResumeParams | null;
+  correlationId: string | null;
 }
 
 export class PlainProcessAgentRuntime implements AgentRuntime {
@@ -83,6 +84,7 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
       },
       turnNumber: 0,
       pendingResume: null,
+      correlationId: params.correlationId ?? null,
       result: {
         exitStatus: "running",
         handoffReportPath: params.taskFilePath,
@@ -121,6 +123,9 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
   resume(handle: RuntimeHandle, params: AgentRuntimeResumeParams): void {
     const state = this.processes.get(handle.id);
     if (!state) return;
+    if (params.allowedTools) {
+      state.allowedTools = [...params.allowedTools];
+    }
     if (this.isAlive(handle)) {
       state.pendingResume = params;
       return;
@@ -146,7 +151,10 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
     if (!state) return;
 
     state.pendingResume = null;
-    appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[process runtime] interrupt: ${reason}`);
+    appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[process runtime] interrupt: ${reason}`, {
+      taskId: handle.taskId,
+      correlationId: state.correlationId,
+    });
     if (state.child && this.isAlive(handle)) {
       state.child.kill("SIGINT");
     }
@@ -219,7 +227,7 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
         "--tools",
         state.allowedTools.join(","),
         "--extension",
-        join(state.workspaceRoot, ".pi", "extensions", "maestro-policy.ts"),
+        join(state.workspaceRoot, "dist", "src", "runtime", "maestro-policy-extension.js"),
       ],
       {
         cwd: state.workspaceRoot,
@@ -236,13 +244,19 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf-8");
       state.output.push(...splitLines(text));
-      appendRuntimeObservation(state.workspaceRoot, handle.agentName, text);
+      appendRuntimeObservation(state.workspaceRoot, handle.agentName, text, {
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+      });
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf-8");
       state.output.push(...splitLines(text));
-      appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[stderr] ${text}`);
+      appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[stderr] ${text}`, {
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+      });
     });
 
     child.on("exit", code => {
@@ -257,6 +271,10 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
       state.workspaceRoot,
       handle.agentName,
       `[process runtime] turn=${state.turnNumber} phase=${phase} model=${state.model} tools=${state.allowedTools.join(",") || "none"}`,
+      {
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+      },
     );
   }
 

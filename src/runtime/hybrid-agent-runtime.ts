@@ -61,11 +61,24 @@ export class HybridAgentRuntime implements AgentRuntime {
   }
 
   destroy(handle: RuntimeHandle): void {
-    this.backends.get(handle.id)?.destroy(handle);
+    const backend = this.backends.get(handle.id) ?? this.fallbackBackend(handle);
+    backend?.destroy(handle);
     this.backends.delete(handle.id);
   }
 
   getResult(handle: RuntimeHandle): RuntimeResult | null {
     return this.backends.get(handle.id)?.getResult(handle) ?? null;
+  }
+
+  private fallbackBackend(handle: RuntimeHandle): AgentRuntime | null {
+    if (handle.runtimeType === "container") {
+      return this.workerRuntime;
+    }
+
+    if (handle.runtimeType === "tmux" || handle.runtimeType === "process" || handle.runtimeType === "dry-run") {
+      return this.hostRuntime;
+    }
+
+    return null;
   }
 }

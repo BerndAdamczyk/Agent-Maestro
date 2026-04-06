@@ -27,7 +27,14 @@ export class RuntimePolicyManager {
     domain: DomainRestrictions;
     taskWriteScope?: string[];
   }): RuntimePolicyManifest {
-    const effectiveDomain = deriveEffectiveDomain(params.domain, params.taskWriteScope ?? []);
+    const effectiveDomain = deriveEffectiveDomain(
+      this.rootDir,
+      params.domain,
+      params.taskWriteScope ?? [],
+      params.phase,
+      params.taskFilePath,
+    );
+    const allowedTools = deriveEffectiveAllowedTools(params.allowedTools, params.phase);
     const policy: RuntimePolicyManifest = {
       schema_version: 1,
       taskId: params.taskId,
@@ -39,7 +46,7 @@ export class RuntimePolicyManager {
       sessionFilePath: this.getSessionFilePath(params.taskId),
       promptFilePath: this.getPromptFilePath(params.taskId),
       denialLogPath: this.getDenialLogPath(),
-      allowedTools: params.allowedTools,
+      allowedTools,
       domain: effectiveDomain,
       readRoots: computeAuthorityRoots(this.rootDir, effectiveDomain.read),
       writeRoots: computeAuthorityRoots(this.rootDir, [...effectiveDomain.upsert, ...effectiveDomain.delete]),
@@ -68,7 +75,7 @@ export class RuntimePolicyManager {
   }
 
   getPolicyExtensionPath(): string {
-    return join(this.rootDir, ".pi", "extensions", "maestro-policy.ts");
+    return join(this.rootDir, "dist", "src", "runtime", "maestro-policy-extension.js");
   }
 
   getDenialLogPath(): string {
@@ -76,20 +83,47 @@ export class RuntimePolicyManager {
   }
 }
 
-function deriveEffectiveDomain(domain: DomainRestrictions, taskWriteScope: string[]): DomainRestrictions {
-  if (taskWriteScope.length === 0) {
-    return domain;
+function deriveEffectiveDomain(
+  rootDir: string,
+  domain: DomainRestrictions,
+  taskWriteScope: string[],
+  phase: TaskPhase,
+  taskFilePath: string,
+): DomainRestrictions {
+  const scopedDomain: DomainRestrictions = taskWriteScope.length === 0
+    ? domain
+    : {
+      read: domain.read,
+      upsert: uniquePatterns(["workspace/**", ...taskWriteScope]),
+      delete: domain.delete,
+    };
+
+  if (phase !== "phase_1_plan") {
+    return scopedDomain;
   }
 
+  const relativeTaskFilePath = normalizeRelativePattern(relative(rootDir, taskFilePath));
   return {
-    read: domain.read,
-    upsert: uniquePatterns(["workspace/**", ...taskWriteScope]),
-    delete: domain.delete,
+    read: scopedDomain.read,
+    upsert: uniquePatterns([relativeTaskFilePath]),
+    delete: [],
   };
 }
 
+function deriveEffectiveAllowedTools(allowedTools: string[], phase: TaskPhase): string[] {
+  if (phase !== "phase_1_plan") {
+    return allowedTools;
+  }
+
+  return allowedTools.filter(tool => tool === "read" || tool === "write" || tool === "edit");
+}
+
 function uniquePatterns(patterns: string[]): string[] {
-  return [...new Set(patterns.map(pattern => pattern.trim()).filter(Boolean))];
+  return [...new Set(patterns.map(pattern => normalizeRelativePattern(pattern)).filter(Boolean))];
+}
+
+function normalizeRelativePattern(pattern: string): string {
+  return pattern.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+/g, "/");
 }
 
 export function computeAuthorityRoots(rootDir: string, patterns: string[]): string[] {

@@ -52,11 +52,18 @@ export function loadConfig(rootDir: string): SystemConfig {
 
 function validateConfig(rootDir: string, config: SystemConfig): void {
   const errors: string[] = [];
+  const seenAgentNames = new Set<string>();
 
   // Check maestro agent file exists
   const maestroPath = join(rootDir, config.paths.agents, config.maestro.file);
   if (!existsSync(maestroPath)) {
     errors.push(`Maestro agent file not found: ${maestroPath}`);
+  } else {
+    const maestroDef = readAgentFile(maestroPath);
+    if (maestroDef) {
+      validateAgentRoleConsistency(maestroDef, "maestro", errors);
+      rememberAgentName(maestroDef.frontmatter.name, seenAgentNames, errors);
+    }
   }
 
   for (const team of config.teams) {
@@ -67,8 +74,15 @@ function validateConfig(rootDir: string, config: SystemConfig): void {
     } else {
       // Check lead has delegate tool
       const leadDef = readAgentFile(join(rootDir, config.paths.agents, team.lead.file));
+      if (leadDef) {
+        rememberAgentName(leadDef.frontmatter.name, seenAgentNames, errors);
+        validateAgentRoleConsistency(leadDef, "lead", errors);
+      }
       if (leadDef && !leadDef.frontmatter.tools.delegate) {
         errors.push(`Team '${team.name}' lead '${team.lead.name}' must have delegate: true`);
+      }
+      if (leadDef && team.workers.length === 0) {
+        errors.push(`Team '${team.name}' lead '${team.lead.name}' has delegate: true but no workers are configured`);
       }
     }
 
@@ -77,6 +91,15 @@ function validateConfig(rootDir: string, config: SystemConfig): void {
       const workerPath = join(rootDir, config.paths.agents, worker.file);
       if (!existsSync(workerPath)) {
         errors.push(`Team '${team.name}' worker agent file not found: ${workerPath}`);
+      } else {
+        const workerDef = readAgentFile(workerPath);
+        if (workerDef) {
+          rememberAgentName(workerDef.frontmatter.name, seenAgentNames, errors);
+          validateAgentRoleConsistency(workerDef, "worker", errors);
+          if (workerDef.frontmatter.tools.delegate) {
+            errors.push(`Worker agent '${workerDef.frontmatter.name}' cannot declare delegate: true in the current team schema`);
+          }
+        }
       }
     }
   }
@@ -112,6 +135,37 @@ function validateConfig(rootDir: string, config: SystemConfig): void {
   if (errors.length > 0) {
     throw new Error(`Config validation failed:\n  - ${errors.join("\n  - ")}`);
   }
+}
+
+function validateAgentRoleConsistency(
+  agent: AgentDefinition,
+  expectedRole: "maestro" | "lead" | "worker",
+  errors: string[],
+): void {
+  const expectedTier = expectedRole === "maestro"
+    ? "curator"
+    : expectedRole === "lead"
+      ? "lead"
+      : "worker";
+
+  if (agent.frontmatter.model_tier !== expectedTier) {
+    errors.push(
+      `Agent '${agent.frontmatter.name}' has model_tier '${agent.frontmatter.model_tier}' but role '${expectedRole}' requires '${expectedTier}'`,
+    );
+  }
+
+  if (expectedRole !== "worker" && !agent.frontmatter.tools.delegate) {
+    errors.push(`Agent '${agent.frontmatter.name}' must have delegate: true for role '${expectedRole}'`);
+  }
+}
+
+function rememberAgentName(name: string, seenAgentNames: Set<string>, errors: string[]): void {
+  if (seenAgentNames.has(name)) {
+    errors.push(`Duplicate agent name in config/agent frontmatter: '${name}'`);
+    return;
+  }
+
+  seenAgentNames.add(name);
 }
 
 function getAllAgentFiles(rootDir: string, config: SystemConfig): string[] {

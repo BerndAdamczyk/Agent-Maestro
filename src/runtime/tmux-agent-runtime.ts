@@ -26,6 +26,7 @@ interface TmuxState {
   turnNumber: number;
   currentTurnToken: string | null;
   pendingResume: AgentRuntimeResumeParams | null;
+  correlationId: string | null;
   result: RuntimeResult;
 }
 
@@ -78,6 +79,7 @@ export class TmuxAgentRuntime implements AgentRuntime {
       turnNumber: 0,
       currentTurnToken: null,
       pendingResume: null,
+      correlationId: params.correlationId ?? null,
       result: {
         exitStatus: "running",
         handoffReportPath: params.taskFilePath,
@@ -116,6 +118,9 @@ export class TmuxAgentRuntime implements AgentRuntime {
   resume(handle: RuntimeHandle, params: AgentRuntimeResumeParams): void {
     const state = this.states.get(handle.id);
     if (!state) return;
+    if (params.allowedTools) {
+      state.allowedTools = [...params.allowedTools];
+    }
     if (this.isAlive(handle)) {
       state.pendingResume = params;
       return;
@@ -146,7 +151,10 @@ export class TmuxAgentRuntime implements AgentRuntime {
     if (!state) return;
 
     state.pendingResume = null;
-    appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[tmux runtime] interrupt: ${reason}`);
+    appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[tmux runtime] interrupt: ${reason}`, {
+      taskId: handle.taskId,
+      correlationId: state.correlationId,
+    });
     this.manager.sendInterrupt(handle.id);
     state.result = finalizeRuntimeResult(state.result, "interrupted");
     this.results.set(handle.id, state.result);
@@ -154,7 +162,10 @@ export class TmuxAgentRuntime implements AgentRuntime {
 
   destroy(handle: RuntimeHandle): void {
     const state = this.states.get(handle.id);
-    if (!state) return;
+    if (!state) {
+      this.manager.destroyPane(handle.id);
+      return;
+    }
 
     state.pendingResume = null;
     if (state.result.exitStatus === "running") {
@@ -162,7 +173,10 @@ export class TmuxAgentRuntime implements AgentRuntime {
       this.results.set(handle.id, state.result);
     }
 
-    appendRuntimeObservation(state.workspaceRoot, handle.agentName, "[tmux runtime] destroy");
+    appendRuntimeObservation(state.workspaceRoot, handle.agentName, "[tmux runtime] destroy", {
+      taskId: handle.taskId,
+      correlationId: state.correlationId,
+    });
     this.manager.destroyPane(handle.id);
     this.states.delete(handle.id);
   }
@@ -209,7 +223,7 @@ export class TmuxAgentRuntime implements AgentRuntime {
       `--message-file ${shellQuote(messageFile)}`,
       `--model ${shellQuote(state.model)}`,
       `--tools ${shellQuote(state.allowedTools.join(","))}`,
-      `--extension ${shellQuote(join(state.workspaceRoot, ".pi", "extensions", "maestro-policy.ts"))}`,
+      `--extension ${shellQuote(join(state.workspaceRoot, "dist", "src", "runtime", "maestro-policy-extension.js"))}`,
       `; code=$?; printf '%s\\n' ${shellQuote(`__MAESTRO_TURN_END__:${state.currentTurnToken}:`)}\"$code\"`,
     ].join(" ");
 
@@ -217,6 +231,10 @@ export class TmuxAgentRuntime implements AgentRuntime {
       state.workspaceRoot,
       handle.agentName,
       `[tmux runtime] turn=${state.turnNumber} phase=${phase} model=${state.model} tools=${state.allowedTools.join(",") || "none"}`,
+      {
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+      },
     );
     this.manager.sendKeys(handle.id, command);
   }

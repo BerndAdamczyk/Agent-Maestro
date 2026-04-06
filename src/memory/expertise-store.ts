@@ -6,10 +6,11 @@
  * Append-only with confidence scores. Domain-locked writes.
  */
 
-import { readFileSync, existsSync, mkdirSync, appendFileSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentFrontmatter, ExpertiseEntry } from "../types.js";
-import { MemoryAccessControl, type MemoryAccessRequest } from "./access-control.js";
+import { atomicWrite, setMarkdownFrontmatterValue, upsertMarkdownSection } from "../utils.js";
+import { MemoryAccessControl } from "./access-control.js";
 
 export class ExpertiseStore {
   private agentsDir: string;
@@ -54,7 +55,7 @@ export class ExpertiseStore {
         "## Collaborations",
         "",
       ].join("\n");
-      writeFileSync(memoryPath, header, "utf-8");
+      atomicWrite(memoryPath, header);
     }
 
     const expertPath = join(dir, "EXPERT.md");
@@ -74,7 +75,7 @@ export class ExpertiseStore {
         "## Proven Heuristics",
         "",
       ].join("\n");
-      writeFileSync(expertPath, header, "utf-8");
+      atomicWrite(expertPath, header);
     }
   }
 
@@ -116,7 +117,9 @@ export class ExpertiseStore {
     const bullet = `- **${entry.content}** (confidence: ${entry.confidence})\n  _Source: ${entry.source}, ${entry.date}_\n`;
 
     const filePath = join(this.agentDir(slug), "MEMORY.md");
-    appendFileSync(filePath, `\n${bullet}`, "utf-8");
+    const current = existsSync(filePath) ? readFileSync(filePath, "utf-8") : "";
+    const withEntry = upsertMarkdownSection(current, section, bullet);
+    atomicWrite(filePath, setMarkdownFrontmatterValue(withEntry, "updated", entry.date));
   }
 
   appendToExpert(
@@ -144,7 +147,12 @@ export class ExpertiseStore {
     const bullet = `- **${entry.content}** (confidence: ${entry.confidence})\n  _Source: ${entry.source}, ${entry.date}_\n`;
 
     const filePath = join(this.agentDir(slug), "EXPERT.md");
-    appendFileSync(filePath, `\n${bullet}`, "utf-8");
+    const current = existsSync(filePath) ? readFileSync(filePath, "utf-8") : "";
+    let withEntry = upsertMarkdownSection(current, section, bullet);
+    withEntry = setMarkdownFrontmatterValue(withEntry, "updated", entry.date);
+    withEntry = setMarkdownFrontmatterValue(withEntry, "domain", targetDomain);
+    withEntry = setMarkdownFrontmatterValue(withEntry, "owner", agentName);
+    atomicWrite(filePath, withEntry);
   }
 
   getExpertisePath(agentName: string): string {

@@ -224,6 +224,7 @@ export interface RuntimeResult {
 export interface AgentRuntimeLaunchParams {
   agentName: string;
   taskId: string;
+  correlationId?: string | null;
   role: "maestro" | "lead" | "worker";
   phase: TaskPhase;
   model: string;
@@ -241,6 +242,7 @@ export interface AgentRuntimeLaunchParams {
 export interface AgentRuntimeResumeParams {
   phase: TaskPhase;
   message: string;
+  allowedTools?: string[];
   resumeToken?: string;
 }
 
@@ -435,6 +437,20 @@ export interface RuntimePolicyManifest {
   readRoots: string[];
   writeRoots: string[];
   deleteRoots: string[];
+}
+
+export interface PersistedActiveWorker {
+  instanceId: string;
+  agentName: string;
+  runtimeId: string;
+  runtimeType: RuntimeType;
+  taskId: string;
+  correlationId: string;
+  role: "maestro" | "lead" | "worker";
+  hierarchyLevel: number;
+  startedAt: string;
+  lastOutputAt: string;
+  parentTaskId: string | null;
 }
 
 export type InactiveRuntimeDisposition =

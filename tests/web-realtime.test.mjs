@@ -17,11 +17,10 @@ test("serializeFileChangeEvent preserves the websocket event kind separately fro
     timestamp: "2026-04-06T18:00:00+02:00",
   }));
 
-  assert.deepEqual(payload, {
-    type: "file:changed",
-    fileType: "task",
-    path: "workspace/tasks/task-001.md",
-    content: "# task-001",
-    timestamp: "2026-04-06T18:00:00+02:00",
-  });
+  assert.equal(payload.type, "file:changed");
+  assert.equal(payload.fileType, "task");
+  assert.equal(payload.path, "workspace/tasks/task-001.md");
+  assert.equal(payload.content, "# task-001");
+  assert.equal(payload.timestamp, "2026-04-06T18:00:00+02:00");
+  assert.equal(payload.parsed?.task?.id, "task-001");
 });

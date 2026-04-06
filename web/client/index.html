@@ -22,7 +22,26 @@
   </nav>
   <main>
     <div id="chat-view" class="view active">
-      <div class="chat-feed" id="chat-feed"></div>
+      <div class="chat-layout">
+        <div class="chat-feed" id="chat-feed"></div>
+        <aside class="runtime-sidebar">
+          <div class="runtime-sidebar-card">
+            <div class="runtime-sidebar-header">
+              <h3>Live Runtime Output</h3>
+              <span id="runtime-pane-count">0 panes</span>
+            </div>
+            <div class="pane-selector" id="pane-selector"></div>
+            <pre class="pane-output runtime-pane-output" id="runtime-pane-output">Waiting for pane output…</pre>
+          </div>
+          <div class="runtime-sidebar-card">
+            <div class="runtime-sidebar-header">
+              <h3>Workspace Events</h3>
+              <span id="event-count">0 events</span>
+            </div>
+            <div class="event-feed" id="event-feed"></div>
+          </div>
+        </aside>
+      </div>
     </div>
     <div id="dashboard-view" class="view">
       <div class="dash-grid" id="dash-grid"></div>
@@ -39,7 +58,7 @@
     <div id="memory-view" class="view">
       <div class="mem-layout">
         <div class="mem-sidebar" id="mem-sidebar"></div>
-        <div class="mem-content"><pre class="config-display" id="mem-content">Select a directory to browse.</pre></div>
+        <div class="mem-content"><pre class="config-display" id="mem-content">Loading memory tree...</pre></div>
       </div>
     </div>
     <div id="config-view" class="view">
@@ -55,6 +74,8 @@
 const S = {
   tasks: [], agents: [], config: null, session: null,
   logEntries: [], chatMessages: [], goal: '', ws: null, wsOk: false,
+  panes: [], paneOutputs: {}, paneOutputMeta: {}, liveEvents: [], selectedPaneId: '',
+  memoryTree: {}, memoryPath: '.', memoryFilePath: '',
 };
 
 const API = '';  // same origin
@@ -71,6 +92,7 @@ $$('#tabs button').forEach(btn => {
     if (btn.dataset.view === 'dashboard') renderDashboard();
     if (btn.dataset.view === 'tasks') renderTasks();
     if (btn.dataset.view === 'agents') renderAgents();
+    if (btn.dataset.view === 'memory') renderMemoryBrowser();
   });
 });
 
@@ -118,13 +140,14 @@ async function api(path) {
 }
 
 async function loadAll() {
-  const [goal, log, tasks, agents, config, session] = await Promise.all([
+  const [goal, log, tasks, agents, config, session, panes] = await Promise.all([
     api('/api/workspace/goal'),
     api('/api/workspace/log'),
     api('/api/tasks'),
     api('/api/agents'),
     api('/api/config'),
     api('/api/session/active'),
+    api('/api/tmux/panes'),
   ]);
   if (goal) S.goal = goal.content || '';
   if (log && log.entries) S.logEntries = log.entries;
@@ -132,24 +155,24 @@ async function loadAll() {
   if (agents) S.agents = agents;
   if (config) S.config = config;
   if (session) S.session = session;
+  if (Array.isArray(panes)) S.panes = panes;
 
   buildChatFromState();
   renderDashboard();
   renderTasks();
   renderAgents();
   renderConfig();
-  renderMemSidebar();
+  await openMemoryDirectory('.', { preserveSelection: true });
+  syncPaneSubscriptions();
 }
 
 // ── Chat: Build from state ─────────────────────────────────────────
 function buildChatFromState() {
   S.chatMessages = [];
-  // Log entries become chat messages
   for (const e of S.logEntries) {
     const msg = classifyLogEntry(e);
     S.chatMessages.push(msg);
   }
-  // Tasks with handoff reports or plan_ready
   for (const t of S.tasks) {
     if (t.handoffReport) {
       S.chatMessages.push({
@@ -163,7 +186,6 @@ function buildChatFromState() {
       });
     }
   }
-  // Sort by timestamp
   S.chatMessages.sort((a, b) => (a.ts || '').localeCompare(b.ts || ''));
   renderChat();
 }
@@ -270,13 +292,100 @@ function appendChatMessage(msg) {
   if (atBottom) feed.scrollTop = feed.scrollHeight;
 }
 
+function rememberLiveEvent(event) {
+  S.liveEvents.unshift(event);
+  S.liveEvents = S.liveEvents.slice(0, 40);
+  renderRuntimeSidebar();
+}
+
+function renderRuntimeSidebar() {
+  renderPaneSelector();
+  renderEventFeed();
+}
+
+function renderPaneSelector() {
+  const selector = $('#pane-selector');
+  const output = $('#runtime-pane-output');
+  const count = $('#runtime-pane-count');
+  if (!selector || !output || !count) return;
+
+  count.textContent = `${S.panes.length} pane${S.panes.length === 1 ? '' : 's'}`;
+
+  if (!S.panes.length) {
+    selector.innerHTML = '<div class="empty-state">No panes available.</div>';
+    output.textContent = 'No tmux panes detected for the configured session.';
+    return;
+  }
+
+  if (!S.selectedPaneId || !S.panes.some(pane => pane.paneId === S.selectedPaneId)) {
+    S.selectedPaneId = S.panes[0].paneId;
+  }
+
+  selector.innerHTML = S.panes.map(pane => {
+    const selected = pane.paneId === S.selectedPaneId ? 'active' : '';
+    const meta = S.paneOutputMeta[pane.paneId];
+    const updated = meta?.updatedAt ? fmtTime(meta.updatedAt) : 'waiting';
+    return `<button class="pane-chip ${selected}" data-pane-id="${esc(pane.paneId)}">
+      <span>${esc(pane.windowName || pane.paneId)}</span>
+      <small>${esc(updated)}</small>
+    </button>`;
+  }).join('');
+
+  selector.querySelectorAll('[data-pane-id]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      S.selectedPaneId = btn.dataset.paneId;
+      renderPaneSelector();
+    });
+  });
+
+  output.textContent = S.paneOutputs[S.selectedPaneId] || 'Waiting for pane output…';
+}
+
+function renderEventFeed() {
+  const feed = $('#event-feed');
+  const count = $('#event-count');
+  if (!feed || !count) return;
+  count.textContent = `${S.liveEvents.length} event${S.liveEvents.length === 1 ? '' : 's'}`;
+
+  if (!S.liveEvents.length) {
+    feed.innerHTML = '<div class="empty-state">No live workspace changes yet.</div>';
+    return;
+  }
+
+  feed.innerHTML = S.liveEvents.map(event => `
+    <div class="event-item">
+      <div class="event-head">
+        <span class="event-type">${esc(event.label)}</span>
+        <span class="event-time">${fmtTime(event.timestamp)}</span>
+      </div>
+      <div class="event-body">${esc(event.body)}</div>
+      ${event.meta ? `<div class="event-meta">${esc(event.meta)}</div>` : ''}
+    </div>
+  `).join('');
+}
+
 // ── Dashboard ──────────────────────────────────────────────────────
 function renderDashboard() {
   const g = $('#dash-grid');
   const s = S.session || {};
+  renderRuntimeSidebar();
   const counts = {};
   for (const t of S.tasks) counts[t.status] = (counts[t.status] || 0) + 1;
   const countHtml = Object.entries(counts).map(([k, v]) => `${statusBadge(k)} <strong>${v}</strong>`).join('  ');
+  const panesHtml = S.panes.length
+    ? `<div class="pane-grid">${S.panes.map(pane => `
+        <div class="pane-card">
+          <div class="pane-header">
+            <div>
+              <strong>${esc(pane.windowName || pane.paneId)}</strong>
+              <div class="pane-meta"><code>${esc(pane.paneId)}</code> · PID ${esc(String(pane.pid || 0))}</div>
+            </div>
+            <span class="pane-health ${pane.healthy ? 'healthy' : 'unhealthy'}">${pane.healthy ? 'healthy' : 'stale'}</span>
+          </div>
+          <pre class="pane-output">${esc(S.paneOutputs[pane.paneId] || 'Waiting for pane output…')}</pre>
+        </div>
+      `).join('')}</div>`
+    : '<div class="empty-state">No tmux panes detected for the configured session.</div>';
 
   g.innerHTML = `
     <div class="card"><h3>Session</h3>
@@ -292,6 +401,7 @@ function renderDashboard() {
     <div class="card"><h3>Tasks (${S.tasks.length})</h3>
       <div style="margin-top:6px;">${countHtml || '<span style="color:var(--text3)">No tasks</span>'}</div>
     </div>
+    <div class="card" style="grid-column: 1/-1;"><h3>Runtime Panes</h3>${panesHtml}</div>
     <div class="card" style="grid-column: 1/-1;"><h3>Recent Log</h3>
       <div class="log-list">${S.logEntries.slice(-30).reverse().map(e =>
         `<div class="log-item"><span class="lt">${fmtTime(e.timestamp)}</span><span class="ll">${esc(e.level || 'info')}</span><span class="la">${esc(e.agent)}</span><span>${esc(e.message)}</span></div>`
@@ -360,7 +470,6 @@ function renderAgents() {
   const c = $('#agents-container');
   if (!S.agents.length) { c.innerHTML = '<p style="color:var(--text3)">No agents loaded.</p>'; return; }
 
-  // Group by level for hierarchy
   const byLevel = {};
   for (const a of S.agents) {
     const lvl = a.level || 3;
@@ -390,16 +499,60 @@ function renderAgents() {
 }
 
 // ── Memory ─────────────────────────────────────────────────────────
-const MEM_DIRS = ['sessions', 'daily', 'agents', 'knowledge-graph'];
-function renderMemSidebar() {
+async function fetchMemoryTree(path = '.') {
+  const tree = await api(`/api/memory/tree?path=${encodeURIComponent(path)}`);
+  if (tree && Array.isArray(tree.entries)) {
+    S.memoryTree[path] = tree.entries;
+  }
+  return tree;
+}
+
+async function openMemoryDirectory(path, options = {}) {
+  const tree = await fetchMemoryTree(path);
+  if (!tree) return;
+  S.memoryPath = path;
+  if (!options.preserveSelection) S.memoryFilePath = '';
+  renderMemoryBrowser();
+}
+
+async function openMemoryFile(path) {
+  const file = await api(`/api/memory/file?path=${encodeURIComponent(path)}`);
+  if (!file) return;
+  S.memoryFilePath = path;
+  $('#mem-content').textContent = file.content || '(empty file)';
+  renderMemoryBrowser();
+}
+
+function renderMemoryBrowser() {
   const sb = $('#mem-sidebar');
-  sb.innerHTML = MEM_DIRS.map(d => `<button data-dir="${d}">${d}/</button>`).join('');
-  $$('#mem-sidebar button').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      $$('#mem-sidebar button').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      // Memory files not exposed via API yet, show placeholder
-      $('#mem-content').textContent = `[${btn.dataset.dir}/] Memory browsing requires /api/memory endpoint.\nFiles in .agent-maestro/memory/${btn.dataset.dir}/ would appear here.`;
+  const currentPath = S.memoryPath || '.';
+  const entries = S.memoryTree[currentPath] || [];
+  const crumbs = currentPath === '.' ? ['memory'] : ['memory', ...currentPath.split('/')];
+
+  sb.innerHTML = `
+    <div class="mem-section-title">Browse</div>
+    <button class="${currentPath === '.' ? 'active' : ''}" data-dir=".">./</button>
+    ${currentPath !== '.' ? `<button data-parent="${esc(currentPath.split('/').slice(0, -1).join('/') || '.')}">../</button>` : ''}
+    ${entries.map(entry => `<button class="${S.memoryFilePath === entry.path || (entry.type === 'directory' && currentPath === entry.path) ? 'active' : ''}" data-path="${esc(entry.path)}" data-kind="${entry.type}">${entry.type === 'directory' ? '📁' : '📄'} ${esc(entry.name)}${entry.type === 'directory' ? '/' : ''}</button>`).join('')}
+  `;
+
+  if (!S.memoryFilePath) {
+    $('#mem-content').textContent = `Path: ${crumbs.join(' / ')}\n\nSelect a file to inspect its contents.`;
+  }
+
+  $$('#mem-sidebar button[data-dir]').forEach(btn => {
+    btn.addEventListener('click', () => openMemoryDirectory(btn.dataset.dir));
+  });
+  $$('#mem-sidebar button[data-parent]').forEach(btn => {
+    btn.addEventListener('click', () => openMemoryDirectory(btn.dataset.parent));
+  });
+  $$('#mem-sidebar button[data-path]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.kind === 'directory') {
+        openMemoryDirectory(btn.dataset.path);
+      } else {
+        openMemoryFile(btn.dataset.path);
+      }
     });
   });
 }
@@ -425,6 +578,8 @@ function connectWS() {
     S.wsOk = true;
     $('#ws-dot').className = 'ws-dot on';
     $('#ws-label').textContent = 'connected';
+    syncPaneSubscriptions();
+    refreshPanes();
   };
 
   ws.onclose = () => {
@@ -452,7 +607,7 @@ function handleWSEvent(data) {
       handleLogEntry(data);
       break;
     case 'pane:output':
-      // Could display terminal output; for now just ignore
+      handlePaneOutput(data);
       break;
   }
 }
@@ -460,26 +615,36 @@ function handleWSEvent(data) {
 async function handleFileChange(data) {
   const p = data.path || '';
   const fileType = data.fileType || data.type || '';
+  const parsed = data.parsed || {};
   const shouldReloadTasks = fileType === 'task' || p.includes('workspace/tasks/');
   const shouldReloadLog = fileType === 'log' || p.includes('workspace/log.');
   const shouldReloadGoal = fileType === 'goal' || p.includes('workspace/goal.md');
   const shouldReloadStatus = fileType === 'status' || p.includes('workspace/status.md');
+  const shouldReloadMemory = fileType === 'memory' || p.includes('memory/');
+
+  const taskPatched = shouldReloadTasks && applyTaskPatch(parsed.task);
+  const logPatched = shouldReloadLog && applyLogPatch(parsed.lastEntry, parsed.totalEntries);
+  if (shouldReloadGoal && typeof parsed.preview === 'string') {
+    S.goal = data.content || parsed.preview;
+  }
+
+  rememberLiveEvent(describeFileChange(data));
 
   const requests = [];
 
-  if (shouldReloadTasks) {
+  if (shouldReloadTasks && !taskPatched) {
     requests.push(api('/api/tasks').then(tasks => {
       if (tasks) S.tasks = tasks;
     }));
   }
 
-  if (shouldReloadLog) {
+  if (shouldReloadLog && !logPatched) {
     requests.push(api('/api/workspace/log').then(log => {
       if (log && log.entries) S.logEntries = log.entries;
     }));
   }
 
-  if (shouldReloadGoal) {
+  if (shouldReloadGoal && typeof parsed.preview !== 'string') {
     requests.push(api('/api/workspace/goal').then(goal => {
       if (goal) S.goal = goal.content || '';
     }));
@@ -489,29 +654,140 @@ async function handleFileChange(data) {
     requests.push(api('/api/session/active').then(session => {
       if (session) S.session = session;
     }));
+    requests.push(api('/api/tmux/panes').then(panes => {
+      if (Array.isArray(panes)) S.panes = panes;
+    }));
   }
 
-  if (requests.length === 0) {
-    return;
+  if (shouldReloadMemory) {
+    requests.push(fetchMemoryTree(S.memoryPath || '.'));
+    if (S.memoryFilePath && p.endsWith(S.memoryFilePath)) {
+      requests.push(api(`/api/memory/file?path=${encodeURIComponent(S.memoryFilePath)}`).then(file => {
+        if (file) $('#mem-content').textContent = file.content || '(empty file)';
+      }));
+    }
   }
 
   await Promise.all(requests);
 
-  if (shouldReloadTasks || shouldReloadLog) {
-    buildChatFromState();
-  }
-
-  if (shouldReloadTasks) {
-    renderTasks();
-  }
+  if (shouldReloadTasks || shouldReloadLog) buildChatFromState();
+  if (shouldReloadTasks) renderTasks();
+  if (shouldReloadMemory && $('#memory-view').classList.contains('active')) renderMemoryBrowser();
 
   renderDashboard();
+  syncPaneSubscriptions();
+}
+
+function applyTaskPatch(task) {
+  if (!task || !task.id) return false;
+  const idx = S.tasks.findIndex(entry => entry.id === task.id);
+  if (idx >= 0) {
+    S.tasks[idx] = task;
+  } else {
+    S.tasks.push(task);
+  }
+  return true;
+}
+
+function applyLogPatch(entry, totalEntries) {
+  if (!entry || !entry.timestamp) return false;
+  const last = S.logEntries[S.logEntries.length - 1];
+  if (!last || last.timestamp !== entry.timestamp || last.message !== entry.message || last.agent !== entry.agent) {
+    S.logEntries.push(entry);
+  }
+  if (typeof totalEntries === 'number' && totalEntries < S.logEntries.length) {
+    return false;
+  }
+  return true;
+}
+
+function describeFileChange(data) {
+  const parsed = data.parsed || {};
+  const path = data.path || 'unknown';
+  const fileType = data.fileType || 'file';
+
+  if (fileType === 'task' && parsed.task) {
+    const task = parsed.task;
+    return {
+      label: `task:${task.status || 'updated'}`,
+      timestamp: data.timestamp,
+      body: `${task.id}: ${task.title || 'updated task'}`,
+      meta: `${task.assignedTo || 'unassigned'} · phase ${task.phase || 'none'}`,
+    };
+  }
+
+  if (fileType === 'log' && parsed.lastEntry) {
+    return {
+      label: 'log:entry',
+      timestamp: data.timestamp,
+      body: parsed.lastEntry.message || 'Workspace log updated',
+      meta: parsed.lastEntry.agent || '',
+    };
+  }
+
+  if (fileType === 'status' && parsed.summary) {
+    const counts = Object.entries(parsed.summary.counts || {}).map(([status, count]) => `${status}:${count}`).join(' · ');
+    return {
+      label: 'status:summary',
+      timestamp: data.timestamp,
+      body: counts || 'Workspace status updated',
+      meta: path,
+    };
+  }
+
+  return {
+    label: `${fileType}:changed`,
+    timestamp: data.timestamp,
+    body: path,
+    meta: (typeof parsed.preview === 'string' && parsed.preview) ? parsed.preview.slice(0, 120) : '',
+  };
+}
+
+function handlePaneOutput(data) {
+  if (!data || !data.paneId) return;
+  const nextContent = data.content || '';
+  const previousContent = S.paneOutputs[data.paneId] || '';
+  S.paneOutputs[data.paneId] = nextContent;
+  S.paneOutputMeta[data.paneId] = { updatedAt: new Date().toISOString() };
+  if (nextContent !== previousContent) {
+    rememberLiveEvent({
+      label: 'pane:output',
+      timestamp: new Date().toISOString(),
+      body: `${data.paneId} streamed ${String(nextContent.split('\n').length)} lines`,
+      meta: nextContent.split('\n').slice(-1)[0] || 'pane updated',
+    });
+  } else {
+    renderRuntimeSidebar();
+  }
+  if ($('#dashboard-view').classList.contains('active')) renderDashboard();
+}
+
+async function refreshPanes() {
+  const panes = await api('/api/tmux/panes');
+  if (!Array.isArray(panes)) return;
+  S.panes = panes;
+  renderRuntimeSidebar();
+  syncPaneSubscriptions();
+  if ($('#dashboard-view').classList.contains('active')) renderDashboard();
+}
+
+function syncPaneSubscriptions() {
+  if (!S.ws || S.ws.readyState !== WebSocket.OPEN) return;
+  for (const pane of S.panes) {
+    S.ws.send(JSON.stringify({ type: 'subscribe:pane', paneId: pane.paneId }));
+  }
 }
 
 function handleLogEntry(data) {
   const entry = { timestamp: data.timestamp, agent: data.agent, message: data.message };
   S.logEntries.push(entry);
   appendChatMessage(classifyLogEntry(entry));
+  rememberLiveEvent({
+    label: 'log:entry',
+    timestamp: data.timestamp,
+    body: data.message || 'Runtime log entry',
+    meta: data.agent || '',
+  });
   renderDashboard();
 }
 
@@ -524,7 +800,6 @@ window.maestro = {
     });
     if (r.ok) {
       const data = await r.json();
-      // Update local state
       const idx = S.tasks.findIndex(t => t.id === taskId);
       if (idx >= 0 && data.task) S.tasks[idx] = data.task;
       buildChatFromState();

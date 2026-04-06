@@ -6,9 +6,10 @@
  * Triggered by pre_compaction lifecycle hook.
  */
 
-import { appendFileSync, readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { DailyProtocolEntry } from "../types.js";
+import { atomicWrite, upsertMarkdownSection } from "../utils.js";
 
 export class DailyProtocolFlusher {
   private dailyDir: string;
@@ -29,43 +30,32 @@ export class DailyProtocolFlusher {
     if (!existsSync(filePath)) {
       const date = new Date().toISOString().slice(0, 10);
       const header = `# Daily Protocol: ${date}\n\n## Findings\n\n## Error Patterns\n\n## Decisions\n\n`;
-      appendFileSync(filePath, header, "utf-8");
+      atomicWrite(filePath, header);
     }
   }
 
   flush(entries: DailyProtocolEntry[]): void {
+    if (entries.length === 0) return;
+
     const filePath = this.todayFile();
     this.ensureHeader(filePath);
 
-    const content = readFileSync(filePath, "utf-8");
-    const lines: string[] = [];
-
-    for (const entry of entries) {
-      const bullet = `- [${entry.time}] (${entry.agent}, confidence: ${entry.confidence}) ${entry.content}${entry.sourceTask ? ` -- ${entry.sourceTask}` : ""}`;
-      lines.push(bullet);
-    }
-
-    if (lines.length === 0) return;
-
-    // Group by category and append to the right section
+    let content = readFileSync(filePath, "utf-8");
     const findings = entries.filter(e => e.category === "finding");
     const errors = entries.filter(e => e.category === "error_pattern");
     const decisions = entries.filter(e => e.category === "decision");
 
-    let appended = "";
-
     if (findings.length > 0) {
-      appended += this.formatEntries(findings);
+      content = upsertMarkdownSection(content, "Findings", this.formatEntries(findings));
     }
     if (errors.length > 0) {
-      appended += this.formatEntries(errors);
+      content = upsertMarkdownSection(content, "Error Patterns", this.formatEntries(errors));
     }
     if (decisions.length > 0) {
-      appended += this.formatEntries(decisions);
+      content = upsertMarkdownSection(content, "Decisions", this.formatEntries(decisions));
     }
 
-    // Append to end of file (delta-append, not rewrite)
-    appendFileSync(filePath, appended, "utf-8");
+    atomicWrite(filePath, content);
   }
 
   private formatEntries(entries: DailyProtocolEntry[]): string {

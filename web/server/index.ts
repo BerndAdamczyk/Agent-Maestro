@@ -24,6 +24,7 @@ import { sessionRoutes } from "./routes/session.js";
 import { skillRoutes } from "./routes/skills.js";
 import { actionRoutes } from "./routes/actions.js";
 import { tmuxRoutes } from "./routes/tmux.js";
+import { memoryRoutes } from "./routes/memory.js";
 
 export interface WebServerDeps {
   rootDir: string;
@@ -38,7 +39,11 @@ export function createWebServer(deps: WebServerDeps) {
   const { rootDir, config, taskManager, agentResolver, logger, getSession } = deps;
 
   const app = express();
-  app.use(express.json());
+  app.disable("x-powered-by");
+  app.use(express.json({ limit: "256kb" }));
+  app.use(createSecurityHeadersMiddleware());
+  app.use(createLoopbackOnlyMiddleware());
+  app.use(createMutationRateLimitMiddleware());
   const tmuxService = new TmuxService(config.tmux_session);
 
   // Static files for web client
@@ -48,6 +53,7 @@ export function createWebServer(deps: WebServerDeps) {
   // API routes
   const workspaceDir = join(rootDir, config.paths.workspace);
   const skillsDir = join(rootDir, config.paths.skills);
+  const memoryDir = join(rootDir, config.paths.memory);
 
   app.use("/api/workspace", workspaceRoutes(workspaceDir));
   app.use("/api/tasks", taskRoutes(taskManager));
@@ -57,6 +63,7 @@ export function createWebServer(deps: WebServerDeps) {
   app.use("/api/skills", skillRoutes(skillsDir));
   app.use("/api/actions", actionRoutes(taskManager, logger));
   app.use("/api/tmux", tmuxRoutes(tmuxService));
+  app.use("/api/memory", memoryRoutes(memoryDir));
 
   // Health check
   app.get("/api/health", (_req, res) => {
@@ -111,5 +118,73 @@ export function createWebServer(deps: WebServerDeps) {
         server.close(() => resolve());
       });
     },
+  };
+}
+
+function createSecurityHeadersMiddleware() {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    res.setHeader("Content-Security-Policy", [
+      "default-src 'self'",
+      "img-src 'self' data:",
+      "style-src 'self' 'unsafe-inline'",
+      "script-src 'self' 'unsafe-inline'",
+      "connect-src 'self' ws: wss:",
+      "base-uri 'none'",
+      "frame-ancestors 'none'",
+      "form-action 'self'",
+    ].join('; '));
+    if (req.path.startsWith("/api/")) {
+      res.setHeader("Cache-Control", "no-store");
+    }
+    next();
+  };
+}
+
+function createLoopbackOnlyMiddleware() {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const remoteAddress = req.socket.remoteAddress ?? req.ip ?? "";
+    if (isLoopbackAddress(remoteAddress)) {
+      next();
+      return;
+    }
+
+    res.status(403).json({ error: "Web UI is restricted to loopback clients." });
+  };
+}
+
+function isLoopbackAddress(address: string): boolean {
+  return address === "127.0.0.1"
+    || address === "::1"
+    || address === "::ffff:127.0.0.1"
+    || address.startsWith("::ffff:127.");
+}
+
+function createMutationRateLimitMiddleware() {
+  const mutationWindowMs = 60_000;
+  const mutationLimit = 30;
+  const requestTimes = new Map<string, number[]>();
+
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
+      next();
+      return;
+    }
+
+    const remoteAddress = req.socket.remoteAddress ?? req.ip ?? "unknown";
+    const key = `${remoteAddress}:${req.method}`;
+    const now = Date.now();
+    const recent = (requestTimes.get(key) ?? []).filter(ts => now - ts < mutationWindowMs);
+    if (recent.length >= mutationLimit) {
+      res.status(429).json({ error: "Too many mutating requests. Please retry shortly." });
+      return;
+    }
+
+    recent.push(now);
+    requestTimes.set(key, recent);
+    next();
   };
 }

@@ -34,6 +34,7 @@ interface ContainerState {
   turnNumber: number;
   containerName: string | null;
   pendingResume: AgentRuntimeResumeParams | null;
+  correlationId: string | null;
 }
 
 export class ContainerAgentRuntime implements AgentRuntime {
@@ -108,6 +109,7 @@ export class ContainerAgentRuntime implements AgentRuntime {
       turnNumber: 0,
       containerName: null,
       pendingResume: null,
+      correlationId: params.correlationId ?? null,
       result: {
         exitStatus: "running",
         handoffReportPath: params.taskFilePath,
@@ -146,6 +148,9 @@ export class ContainerAgentRuntime implements AgentRuntime {
   resume(handle: RuntimeHandle, params: AgentRuntimeResumeParams): void {
     const state = this.containers.get(handle.id);
     if (!state) return;
+    if (params.allowedTools) {
+      state.allowedTools = [...params.allowedTools];
+    }
     if (this.isAlive(handle)) {
       state.pendingResume = params;
       return;
@@ -171,7 +176,10 @@ export class ContainerAgentRuntime implements AgentRuntime {
     if (!state) return;
 
     state.pendingResume = null;
-    appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[container runtime] interrupt: ${reason}`);
+    appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[container runtime] interrupt: ${reason}`, {
+      taskId: handle.taskId,
+      correlationId: state.correlationId,
+    });
     if (state.containerName) {
       try {
         execFileSync("docker", ["kill", state.containerName], { stdio: "ignore" });
@@ -288,13 +296,19 @@ export class ContainerAgentRuntime implements AgentRuntime {
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf-8");
       state.output.push(...splitLines(text));
-      appendRuntimeObservation(state.workspaceRoot, handle.agentName, text);
+      appendRuntimeObservation(state.workspaceRoot, handle.agentName, text, {
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+      });
     });
 
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf-8");
       state.output.push(...splitLines(text));
-      appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[stderr] ${text}`);
+      appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[stderr] ${text}`, {
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+      });
     });
 
     child.on("exit", code => {
@@ -310,6 +324,10 @@ export class ContainerAgentRuntime implements AgentRuntime {
       state.workspaceRoot,
       handle.agentName,
       `[container runtime] turn=${state.turnNumber} phase=${phase} model=${state.model} tools=${state.allowedTools.join(",") || "none"} image=${this.imageName}`,
+      {
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+      },
     );
   }
 
@@ -376,7 +394,7 @@ function buildContainerRunnerCommand(state: ContainerState, messageFile: string)
     "--tools",
     state.allowedTools.join(","),
     "--extension",
-    "/workspace/repo/.pi/extensions/maestro-policy.ts",
+    "/workspace/repo/dist/src/runtime/maestro-policy-extension.js",
   ];
 
   const runnerCommand = runnerArgs.map(shellQuote).join(" ");
