@@ -1,9 +1,10 @@
 # Agent Maestro - Architecture Documentation (Arc42)
 
-> **Version:** 3.0  
-> **Last Updated:** 2026-04-05  
-> **Status:** Current architecture + target vision (planned features marked with *[target]*)  
-> **Changelog:** v3.0 -- Ground-up redesign. Renamed Orchestrator to **Maestro**; all code references updated (maestro.ts, agents/maestro.md). Level-based hierarchy: L1 Maestro, L2..n-1 Team-Leads, Ln Worker-Agents. **4-level Agent Memory System** fully wired into architecture: Memory Subsystem as first-class container (5.1) and component diagram (5.2.2) with SessionDAGManager, DailyProtocolFlusher, ExpertiseStore, KnowledgeGraphLoader, GitCheckpointEngine, MemoryAccessControl. Knowledge graph branch loading integrated into PromptAssembler (5.2.1, 8.2). Level 3 storage unified to MEMORY.md/EXPERT.md (no more mental-models/*.yaml). Runtime sequences added: Session DAG branching/rewind (6.7), Silent Memory Flush with pre_compaction lifecycle hook (6.8). Lifecycle state machine updated with Flushing and MemoryPromotion states (8.7). **Tiered process isolation**: containers for Workers, tmux for Leads/Maestro (ADR-002 rewritten). **Model tiering policy** in config and agent frontmatter (8.15). Security section rewritten with hierarchy-aligned isolation model (8.5). Git-Memory integration (8.17), Memory Best Practices (8.18), ADR-008. Deployment view updated with container runtime, git engine, memory/ directory structure. Zod schema validation, schema_version in all file formats. Resolved tech debt D1 (python3), F6 (containers), F21 (YAML parsing).  
+> **Version:** 3.1
+> **Last Updated:** 2026-04-06
+> **Status:** Current architecture + target vision (planned features marked with *[target]*)
+> **Changelog:** v3.1 -- Decision-completion pass for the first real runtime. Locked the concrete execution model: **Pi** as the default agent runtime behind a formal `AgentRuntime` contract, and a deterministic TypeScript Maestro that prefers developer-authored `workspace/plan.md` and otherwise falls back to structured JSON LLM decomposition. Wave scheduling clarified as stable topological sorting with cycle detection (6.1, 6.6, ADR-006). Plan-gate rewritten as a runtime-enforced two-phase protocol with explicit resume semantics (6.2, 8.7). Handoff reports upgraded from convention to lead-enforced quality gate with schema semantics (2.3, 8.16). Security policy made concrete: workspace content treated as untrusted, secret redaction before persistence, and explicit prompt/tool authority boundaries (8.5). Deployment defaults completed for worker containers: prebuilt rootless image, bounded resources, read-write assigned workspace, read-only shared definitions, outbound HTTPS, and plain-process fallback when tmux is unavailable (7, 8.12). Logging, correlation, health checks, and atomic shared-state writes aligned to the runtime protocol (8.6, 8.11).
+> v3.0 -- Ground-up redesign. Renamed Orchestrator to **Maestro**; all code references updated (maestro.ts, agents/maestro.md). Level-based hierarchy: L1 Maestro, L2..n-1 Team-Leads, Ln Worker-Agents. **4-level Agent Memory System** fully wired into architecture: Memory Subsystem as first-class container (5.1) and component diagram (5.2.2) with SessionDAGManager, DailyProtocolFlusher, ExpertiseStore, KnowledgeGraphLoader, GitCheckpointEngine, MemoryAccessControl. Knowledge graph branch loading integrated into PromptAssembler (5.2.1, 8.2). Level 3 storage unified to MEMORY.md/EXPERT.md (no more mental-models/*.yaml). Runtime sequences added: Session DAG branching/rewind (6.7), Silent Memory Flush with pre_compaction lifecycle hook (6.8). Lifecycle state machine updated with Flushing and MemoryPromotion states (8.7). **Tiered process isolation**: containers for Workers, tmux for Leads/Maestro (ADR-002 rewritten). **Model tiering policy** in config and agent frontmatter (8.15). Security section rewritten with hierarchy-aligned isolation model (8.5). Git-Memory integration (8.17), Memory Best Practices (8.18), ADR-008. Deployment view updated with container runtime, git engine, memory/ directory structure. Zod schema validation, schema_version in all file formats. Resolved tech debt D1 (python3), F6 (containers), F21 (YAML parsing).
 > v2.0 -- Comprehensive review incorporating production agent orchestration patterns, NotebookLM research (arc42 + agentic AI guides), and gap analysis. Added: agent lifecycle state machine, timeout/deadlock detection, resource management/backpressure, context window management, conflict resolution, domain model, configuration management, logging/audit trail, 3 new ADRs with alternatives considered for all ADRs, structured risk/debt separation, stimulus-response quality scenarios, expanded glossary, future improvements roadmap (Section 13).
 
 ---
@@ -80,7 +81,8 @@ Any agent with the `delegate` tool can spawn sub-agents, who can in turn spawn t
 | tmux + container runtime | tmux for Maestro/Team-Leads; Docker/Podman for Worker-Agent isolation (Linux/macOS only) |
 | LLM provider dependency | Requires API access to Google Gemini or Anthropic Claude via ACP OAuth |
 | Node.js 22+ runtime | Web server and TypeScript compilation require modern Node.js |
-| Agent framework | Agent runtime uses a coding-agent framework (e.g., Pi) for tool-use, extensions, and session management |
+| Deterministic orchestrator | The Maestro is a TypeScript control loop that validates plans, computes waves, drives monitoring, and invokes agent runtimes; it is not a free-running LLM agent |
+| Agent framework | Agent runtime uses **Pi** (`@mariozechner/pi-coding-agent`) by default via a formal `AgentRuntime` interface; alternate runtimes remain replaceable behind the same contract |
 | File-based coordination | Markdown/YAML files in `workspace/` are the canonical state -- no database |
 | Git dependency | Memory subsystem requires Git for automated checkpoints, branch-per-worker isolation, and audit trail |
 
@@ -98,7 +100,9 @@ Any agent with the `delegate` tool can spawn sub-agents, who can in turn spawn t
 | Agent format | Markdown files with YAML frontmatter (model, skills, tools, domain permissions). Granting `delegate: true` in tools enables the agent to spawn sub-agents, placing it at any level of the hierarchy tree. |
 | Memory system | 4-level memory: session DAG (JSONL), daily protocols (Markdown), long-term expertise (MEMORY.md/EXPERT.md), knowledge graph (Markdown tree) |
 | Coordination protocol | All state flows through workspace files (goal.md, plan.md, status.md, log.md, tasks/) |
-| Handoff reports | Four mandatory sections: Changes Made / Patterns Followed / Unresolved Concerns / Suggested Follow-ups |
+| Planning precedence | `workspace/plan.md` is authoritative when present. If it is absent, the Maestro may request structured JSON decomposition from the LLM, then validates dependencies and computes waves deterministically |
+| Shared-state durability | `workspace/status.md`, `workspace/log.md`, and `workspace/plan.md` are coordination primitives and must be written atomically via write-temp-then-rename |
+| Handoff reports | Four mandatory sections: Changes Made / Patterns Followed / Unresolved Concerns / Suggested Follow-ups. Acceptance is a lead-level quality gate, not a prompt-only convention |
 
 ---
 
@@ -118,7 +122,7 @@ graph TB
     Claude["<b>Anthropic Claude ACP</b><br/><i>External System</i><br/>LLM provider via OAuth"]
     NotebookLM["<b>Google NotebookLM</b><br/><i>External System</i><br/>Source-grounded research from<br/>uploaded documents"]
     FileSystem["<b>Local File System</b><br/><i>Infrastructure</i><br/>Workspace artifacts, agent definitions,<br/>mental models, skills"]
-    Tmux["<b>tmux</b><br/><i>Infrastructure</i><br/>Terminal multiplexer for<br/>process isolation"]
+    RuntimeInfra["<b>tmux / Container Runtime</b><br/><i>Infrastructure</i><br/>tmux for Maestro/Leads,<br/>rootless containers for Workers"]
     Git["<b>Git / GitHub</b><br/><i>External System [target]</i><br/>Version control, PRs, CI"]
     Tracker["<b>Linear / Jira</b><br/><i>External System [target]</i><br/>Issue tracking"]
 
@@ -127,7 +131,7 @@ graph TB
     System -- "Requests completions<br/>via OAuth (HTTPS)" --> Claude
     System -- "Queries research documents<br/>via browser automation (Playwright)" --> NotebookLM
     System -- "Reads/writes workspace artifacts,<br/>agent prompts, mental models" --> FileSystem
-    System -- "Spawns isolated agent processes<br/>in panes (shell exec)" --> Tmux
+    System -- "Spawns isolated agent processes<br/>via runtime control" --> RuntimeInfra
     System -. "Creates branches, PRs,<br/>reads CI status [target]" .-> Git
     System -. "Creates/updates issues,<br/>links tasks [target]" .-> Tracker
 
@@ -137,7 +141,7 @@ graph TB
     style Claude fill:#999,color:#fff
     style NotebookLM fill:#999,color:#fff
     style FileSystem fill:#999,color:#fff
-    style Tmux fill:#999,color:#fff
+    style RuntimeInfra fill:#999,color:#fff
     style Git fill:#666,color:#fff,stroke-dasharray: 5 5
     style Tracker fill:#666,color:#fff,stroke-dasharray: 5 5
 ```
@@ -151,7 +155,7 @@ graph TB
 | Anthropic Claude ACP | Prompts with system context | LLM completions, tool calls | HTTPS (OAuth token) |
 | Google NotebookLM | Research questions | Source-grounded answers from uploaded docs | Browser automation (Playwright) |
 | Local File System | File reads | Workspace artifacts, config, agent definitions | Node.js fs / shell |
-| tmux | Session/pane commands | Process isolation, output capture | Shell exec |
+| tmux / container runtime | Session/pane/container commands | Process isolation, output capture | Shell exec |
 
 ---
 
@@ -163,17 +167,17 @@ The following fundamental decisions shape the architecture:
 |---|----------|-----------|
 | 1 | **Unlimited-depth hierarchical delegation** | Recursive tree structure: any agent with the `delegate` tool can spawn sub-agents to any depth. Level 1 is always the Maestro, levels 2..n-1 are Team-Leads, and level n agents are Worker-Agents. Teams and sub-teams can be added without architectural changes. |
 | 2 | **File-based coordination** | Markdown/YAML files in `workspace/` as canonical state. Human-readable, git-trackable, crash-recoverable. No database needed for core orchestration. |
-| 3 | **Coding-agent framework as runtime** | Each agent runs as an isolated process with its own system prompt, 4-level memory context, and skill injection. Leverages a tool-use and extension framework. |
+| 3 | **Deterministic Maestro + Pi runtime contract** | The Maestro is a TypeScript controller that validates plans, computes waves, and supervises execution. Delegated agents run through a formal `AgentRuntime` interface, with Pi as the default implementation for v1. |
 | 4 | **Tiered process isolation** | Maestro and Team-Leads run in tmux panes (debuggable via `attach`). Worker-Agents run in containers with cgroup resource limits. Dev-mode fallback: all agents in tmux. |
-| 5 | **Wave-based scheduling** | Tasks sorted into dependency waves. All tasks in wave N must complete before wave N+1 starts. Prevents race conditions on shared artifacts. |
-| 6 | **Quality gates as protocol** | Plan-approval gate (plan_ready -> plan_approved), reconciliation loop (validation command -> fix-task on failure), structured handoff reports. |
+| 5 | **Deterministic wave scheduling** | Developers or LLMs provide tasks plus dependencies; the Maestro validates the task graph, rejects cycles, and computes reproducible waves by stable topological sort. |
+| 6 | **Runtime-enforced quality gates** | Plan-approval is a two-phase runtime protocol (`phase_1_plan` -> approval/revision -> `phase_2_execute`), reconciliation remains mandatory, and handoff reports are schema-validated before acceptance. |
 | 7 | **4-level memory system** | Agent memory organized in 4 levels: L1 Session DAG (ephemeral JSONL), L2 Daily Protocols (episodic Markdown), L3 Expertise (MEMORY.md/EXPERT.md, domain-locked), L4 Knowledge Graph (Maestro-curated Markdown tree). Hierarchy-governed write permissions. Git-integrated audit trail. |
 | 8 | **Plugin-slot architecture** *[target]* | Runtime/Workspace/SCM/Tracker/Notifier/Terminal as swappable interfaces. Decouples core from integrations. |
 | 9 | **Reflection-based training** *[target]* | Reflexion-style improvement through evidence-backed learnings. Training pipeline: Outcome Evidence -> Reflection Summary -> Skill Update. No weight fine-tuning. |
 | 10 | **Evidence-gated gamification** *[target]* | XP = Base x Quality x Difficulty x Novelty x Integrity. XP tied to hard signals (CI pass, review approval, reconcile pass). Anti-gaming mechanisms built in. |
-| 11 | **Layered fault tolerance** | Defense-in-depth: tmux crash resilience, session resume, LLM failover chains, stall detection with escalation ladder, reconciliation retry loops. No single failure should lose completed work. |
+| 11 | **Layered fault tolerance** | Defense-in-depth: tmux/container crash resilience, session resume, LLM failover chains, runtime health checks, and a bounded escalation ladder (`nudge -> interrupt/abort -> reassign`). No single failure should lose completed work. |
 | 12 | **Resource-aware backpressure** | Spawn budget (max panes), wave-based scheduling, and delegation depth guards prevent resource exhaustion. New delegations queue when at capacity. |
-| 13 | **Context window budgeting** | Token budget allocation per prompt component. Mental model pruning, skill progressive disclosure, and sub-agent context isolation prevent context rot in deep hierarchies. |
+| 13 | **Context window budgeting** | Token budget allocation per prompt component uses provider-aware counting where available. Mental model pruning, skill progressive disclosure, and sub-agent context isolation prevent context rot in deep hierarchies. |
 
 ---
 
@@ -202,7 +206,7 @@ graph TB
 
         WebClient["<b>Web Client</b><br/><i>Vanilla JS SPA</i><br/>Chat-like delegation view,<br/>Dashboard, Tasks, Agents,<br/>Memory Explorer, Config"]
 
-        RuntimeMgr["<b>Runtime Manager</b><br/><i>tmux / Container</i><br/>Agent process isolation:<br/>tmux panes (dev mode),<br/>containers (production mode)"]
+        RuntimeMgr["<b>Runtime Manager</b><br/><i>tmux / Container / Process</i><br/>Agent process isolation:<br/>tmux panes (dev mode),<br/>containers (production mode),<br/>plain-process fallback"]
 
         Workspace["<b>Workspace</b><br/><i>File System</i><br/>goal.md, plan.md, status.md,<br/>log.md, tasks/"]
 
@@ -283,6 +287,8 @@ graph TB
 
 Source: `src/maestro.ts`
 
+The Maestro Runtime is the concrete **deterministic control plane** for v1. It owns plan validation, wave computation, monitoring, and recovery logic. Delegated agent execution is abstracted behind `AgentRuntime`, with `PiRuntime` as the default implementation and a plain-process fallback for environments where `tmux` is unavailable.
+
 ```mermaid
 graph TB
     subgraph MaestroRuntime ["Maestro Runtime (src/maestro.ts)"]
@@ -332,6 +338,16 @@ graph TB
     style Logger fill:#85BBF0,color:#000
     style ActiveWorkers fill:#85BBF0,color:#000
 ```
+
+**Concrete runtime contract (`AgentRuntime`):**
+
+| Concern | Contract |
+|---------|----------|
+| Launch | `launch({ systemPromptPath, taskFilePath, workspaceRoot, allowedTools, timeoutMs, env, phase }) -> RuntimeHandle` |
+| Resume | `resume(handle, { phase, message, resumeToken })` resumes a previously paused task turn after plan approval or revision |
+| Monitoring | `isAlive(handle)` + `getOutput(handle)` provide liveness and diagnostic output independent of the underlying runtime |
+| Intervention | `interrupt(handle, reason)` and `destroy(handle)` support the escalation ladder without changing orchestration logic |
+| Result signaling | Primary signal is workspace/task status; secondary signal is runtime exit status; terminal output markers are diagnostic only |
 
 #### 5.2.2 Memory Subsystem Components
 
@@ -600,7 +616,15 @@ Key types and interfaces with their source locations.
 | `SystemConfig` | `maestro.ts` | Team structure, paths, model tier policy, memory config -- parsed from `multi-team-config.yaml` via Zod |
 | `AgentFrontmatter` | `maestro.ts` | Per-agent: name, model, model_tier, expertise path, skills, tool permissions, memory permissions, domain restrictions |
 | `ActiveWorker` | `maestro.ts` | Runtime tracking: agent name, runtime ID (pane/container), task ID, role, hierarchy level, start timestamp |
+| `AgentRuntime` | `runtime/` | Runtime abstraction implemented by `PiRuntime` (default), container-backed worker launchers, and plain-process fallback |
+| `RuntimeHandle` | `runtime/` | Opaque runtime reference used for liveness checks, output capture, interrupt/resume, and teardown |
 | `AgentRef` | `maestro.ts` | Lightweight agent reference: name, file path, UI color, hierarchy level |
+| `TaskPlan` | `maestro.ts` | Structured decomposition result: tasks, dependencies, `plan_first`, validation commands, and task metadata before wave computation |
+| `TaskStatus` | `maestro.ts` | Canonical task states: `pending`, `in_progress`, `plan_ready`, `plan_revision_needed`, `plan_approved`, `complete`, `failed`, `stalled` |
+| `TaskPhase` | `maestro.ts` | Runtime phase marker: `phase_1_plan` or `phase_2_execute` |
+| `HandoffReport` | `maestro.ts` | Structured task output contract with four mandatory sections plus semantic validation requirements |
+| `ProviderConfig` | `maestro.ts` | Provider credentials, retry/failover policy, and model routing for a tier or explicit model ID |
+| `ContainerPolicy` | `runtime/` | Worker container defaults: image, mounts, network posture, CPU/memory/disk limits |
 | `TeamConfig` | `maestro.ts` | Team definition: name, lead AgentRef, workers AgentRef[] |
 | `MemoryConfig` | `memory/` | Per-level configuration: retention policies, token budgets, compaction schedule |
 
@@ -609,8 +633,9 @@ Key types and interfaces with their source locations.
 | Type | Location | Purpose |
 |------|----------|---------|
 | `FileChangeEvent` | `services/file-watcher.ts` | Typed file change: path, type (goal/plan/status/log/task/config/agent/mental-model/skill), content |
-| `ParsedTask` | `services/task-parser.ts` | Structured task: id, title, description, assignedTo, status, phase, output sections |
-| `LogEntry` | `services/markdown-table.ts` | Parsed log row: timestamp, agent, message |
+| `ParsedTask` | `services/task-parser.ts` | Structured task: id, title, description, assignedTo, status, phase, dependencies, wave, task type, output sections |
+| `LogEntry` | `services/markdown-table.ts` | Parsed log row: timestamp, level, taskId, correlationId, agent, message |
+| `LogEvent` | `logging/` | Machine-readable event companion to Markdown logs for audit, health checks, and future structured event sinks |
 
 #### Agent Prompt Structure
 
@@ -705,13 +730,13 @@ schema_version: 1
 
 ### 6.1 Full Delegation Flow
 
-The core workflow: from goal to task completion through the agent hierarchy (shown here with a 3-level configuration: Maestro -> Team-Lead -> Worker-Agent, but the delegation mechanism is recursive -- any agent with the `delegate` tool can spawn further sub-agents to arbitrary depth).
+The core workflow: from goal to task completion through the agent hierarchy (shown here with a 3-level configuration: Maestro -> Team-Lead -> Worker-Agent, but the delegation mechanism is recursive -- any agent with the `delegate` tool can spawn further sub-agents to arbitrary depth). The Maestro is a **deterministic TypeScript controller**: it first checks whether `workspace/plan.md` already exists, otherwise it requests a structured `TaskPlan` from the LLM, validates dependencies, and computes waves by stable topological sort before delegating through `AgentRuntime` (`PiRuntime` by default).
 
 ```mermaid
 sequenceDiagram
     participant Dev as Developer
     participant RS as run.sh
-    participant Tmux as tmux
+    participant Runtime as AgentRuntime
     participant Maestro as Maestro [Level 1]
     participant WS as Workspace Files
     participant Lead as Team-Lead [Level 2]
@@ -720,18 +745,24 @@ sequenceDiagram
 
     Dev->>RS: ./run.sh "Build auth module"
     RS->>WS: Write goal.md
-    RS->>Tmux: Create session "agent-orchestrator"
-    RS->>Tmux: Launch agent runtime (maestro.ts)
+    RS->>Runtime: Create runtime session
+    RS->>Runtime: Launch Maestro controller
 
     activate Maestro
     Maestro->>WS: Read goal.md
-    Maestro->>LLM: Reason about decomposition
-    LLM-->>Maestro: Task breakdown
+    Maestro->>WS: Read plan.md (if present)
+    alt plan.md exists
+        Maestro->>Maestro: Parse authoritative TaskPlan
+    else no plan.md
+        Maestro->>LLM: Request structured JSON decomposition
+        LLM-->>Maestro: TaskPlan JSON
+    end
+    Maestro->>Maestro: Validate graph + computeWaves()
 
     Note over Maestro,WS: Wave 1: Planning
     Maestro->>WS: write_task (task-001, task-002)
-    Maestro->>Tmux: delegate("Planning Lead", task-001)
-    Tmux->>Lead: Spawn agent in runtime
+    Maestro->>Runtime: delegate("Planning Lead", task-001)
+    Runtime->>Lead: Spawn agent in runtime
     activate Lead
     Lead->>WS: Read task file
     Lead->>LLM: Plan approach
@@ -742,11 +773,11 @@ sequenceDiagram
     Maestro->>WS: monitor(task-001) -- polls status
 
     Note over Maestro,WS: Wave 2: Engineering
-    Maestro->>Tmux: delegate("Engineering Lead", task-003)
-    Tmux->>Lead: Spawn agent in runtime
+    Maestro->>Runtime: delegate("Engineering Lead", task-003)
+    Runtime->>Lead: Spawn agent in runtime
     activate Lead
-    Lead->>Tmux: delegate("Backend Dev", subtask)
-    Tmux->>Worker: Spawn agent in runtime
+    Lead->>Runtime: delegate("Backend Dev", subtask)
+    Runtime->>Worker: Spawn agent in runtime
     activate Worker
     Worker->>WS: Read task, implement
     Worker->>LLM: Code generation
@@ -762,33 +793,36 @@ sequenceDiagram
         Maestro->>WS: Log: reconcile passed
     else FAIL
         Maestro->>WS: Auto-create fix-task
-        Maestro->>Tmux: delegate fix-task
+        Maestro->>Runtime: delegate fix-task
     end
     deactivate Maestro
 ```
 
 ### 6.2 Plan-Approval Gate (Two-Phase Protocol)
 
-Quality gate ensuring workers plan before implementing.
+Quality gate ensuring workers plan before implementing. This gate is **runtime-enforced**, not prompt-enforced: the phase-1 worker run ends after planning, and the Monitor/Delegation engines resume phase 2 only after approval.
 
 ```mermaid
 sequenceDiagram
     participant Lead as Lead Agent
     participant WS as Workspace
     participant Worker as Worker Agent
+    participant Monitor as Monitoring Engine
     participant FW as File Watcher
     participant UI as Web UI
 
     Lead->>WS: delegate(worker, task, plan_first: true)
     Note over WS: Task created with<br/>Phase: phase_1_plan<br/>Status: pending
 
+    Monitor->>Worker: launch(task, phase_1_plan)
     activate Worker
     Worker->>WS: Read task description
 
     Note over Worker: Phase 1: Plan Only
     Worker->>WS: Write "Proposed Approach" section
     Worker->>WS: Set Status: "plan_ready"
-    Worker->>Worker: STOP -- do not implement
+    Worker-->>Monitor: Exit phase 1 turn cleanly
+    deactivate Worker
 
     FW->>UI: file:changed (task file)
     UI->>UI: Show plan for review
@@ -800,17 +834,28 @@ sequenceDiagram
     else Revision Needed
         Lead->>WS: Set Status: "plan_revision_needed"
         Lead->>WS: Add revision feedback
+        Monitor->>Worker: resume(task, phase_1_plan)
+        activate Worker
         Worker->>WS: Revise approach
         Worker->>WS: Set Status: "plan_ready"
+        Worker-->>Monitor: Exit revised plan turn
+        deactivate Worker
     end
 
     Note over Worker: Phase 2: Execute
-    Worker->>WS: Detect plan_approved
+    Monitor->>Worker: resume(task, phase_2_execute)
+    activate Worker
     Worker->>Worker: Implement as planned
     Worker->>WS: Write structured handoff report
     Worker->>WS: Set Status: "complete"
     deactivate Worker
 ```
+
+**Authoritative semantics:**
+- `plan_ready` means the current runtime turn has ended without execution work.
+- `plan_approved` is consumed by the orchestrator, not self-detected by the worker.
+- `plan_revision_needed` creates a new plan-only turn with explicit feedback.
+- No worker may cross from planning to execution inside one uninterrupted runtime turn when `plan_first: true`.
 
 ### 6.3 Reconciliation Loop
 
@@ -969,6 +1014,12 @@ graph LR
     style Wave4 fill:#F3E5F5,stroke:#9C27B0
 ```
 
+**Wave computation policy:**
+- Developers or LLMs specify tasks plus dependency edges; they do not authoritatively assign wave numbers.
+- The Maestro computes `wave_number` by stable topological sort over the dependency graph.
+- Cycles are a hard validation error. The system reports the involved task IDs and refuses execution until the plan is corrected.
+- Tasks with equal dependency rank are ordered deterministically (task creation order, then task ID) so reruns are reproducible.
+
 ### 6.7 Session DAG Branching and Rewind (Level 1 Memory)
 
 When a tool call fails or an agent reaches a dead end, the **SessionDAGManager** (Section 5.2.2) enables branching back to a stable checkpoint without polluting the main reasoning chain. This is a concrete runtime mechanism, not a future target.
@@ -1043,6 +1094,8 @@ sequenceDiagram
 
 The entire system runs on a single developer machine. Worker-Agents run in containers for security isolation; Team-Leads and Maestro use tmux panes for debuggability.
 
+For the first real runtime, the worker container policy is fixed: a **prebuilt rootless image** with Pi installed, default limits of **4 CPU / 8 GB RAM / bounded disk**, a **read-write mount of the assigned workspace root** (typically the worker's feature branch or isolated work area), **read-only mounts for shared agent and skill definitions**, and **outbound HTTPS enabled** for LLM API access. If `tmux` is unavailable, the Maestro falls back to a plain-process runtime behind the same `AgentRuntime` contract; orchestration semantics remain unchanged, but attach/debug ergonomics are reduced.
+
 ```mermaid
 graph TB
     subgraph Machine ["Developer Machine (Linux/macOS)"]
@@ -1102,11 +1155,11 @@ graph TB
 |--------|--------|-----------|
 | Hosting | Local developer machine | Privacy, latency, no cloud costs |
 | Maestro/Lead isolation | tmux panes | Lightweight, attachable, debuggable; trusted agents on host |
-| Worker isolation | Docker/Podman containers | Rootless containers with cgroup limits; least-privilege for untrusted execution |
+| Worker isolation | Docker/Podman containers | Prebuilt rootless image with Pi installed; default 4 CPU / 8 GB RAM / bounded disk; read-write assigned workspace, read-only shared definitions, outbound HTTPS allowed |
 | Web server | Express.js on port 3000 | Simple, well-known, sufficient for single-user local use |
 | Real-time updates | WebSocket (ws library) | Full-duplex, low-latency file change notifications |
 | File watching | Chokidar | Cross-platform, efficient (inotify on Linux, fsevents on macOS) |
-| Agent runtime | Coding-agent framework (e.g., Pi) | Provides tool-use framework, extension system, session management |
+| Agent runtime | `AgentRuntime` with `PiRuntime` default | Keeps orchestration deterministic while allowing tmux, container, and plain-process execution backends behind one contract |
 | Memory persistence | File system (memory/ directory) | 4-level memory as Markdown/JSONL, git-trackable, human-readable |
 | Memory versioning | Git (automated checkpoints) | `mem:` commit convention; branch-per-worker; merge-on-completion |
 | Target: DB | SQLite | For XP/score/training history alongside file-based artifacts *[target]* |
@@ -1122,13 +1175,13 @@ All orchestration state flows through Markdown/YAML files in `workspace/`. This 
 | File | Purpose | Writer | Reader |
 |------|---------|--------|--------|
 | `workspace/goal.md` | Session objective | Developer / run.sh | Maestro, all agents (via shared context) |
-| `workspace/plan.md` | Execution strategy with phases | Planning Lead | Maestro, all agents |
-| `workspace/status.md` | Task status table | Maestro, delegation engine | All agents, Web UI |
-| `workspace/log.md` | Activity log (markdown table) | Logger (all tools) | All agents, Web UI |
+| `workspace/plan.md` | Execution strategy with phases; authoritative plan when present | Developer or Planning Lead | Maestro, all agents |
+| `workspace/status.md` | Task status table | Maestro / Monitoring Engine | All agents, Web UI |
+| `workspace/log.md` | Activity log (markdown table) | Logger component | All agents, Web UI |
 | `workspace/tasks/task-NNN.md` | Individual task with handoff report | Worker-Agents (output), Maestro (creation) | Team-Leads (review), Web UI |
 
 **Advantages:** Human-readable, git-trackable, crash-recoverable, no database needed.  
-**Disadvantages:** No atomic transactions, no concurrent write protection, no query capability.
+**Disadvantages:** No database transactions and no native query capability. Concurrency is controlled by single-writer conventions, task ownership, and mandatory atomic writes for shared coordination files.
 
 ### 8.2 Agent Identity and Prompt Assembly
 
@@ -1150,6 +1203,8 @@ At delegation time, the Maestro (or any delegating Team-Lead) assembles a full s
 ```
 
 **Knowledge graph branch selection:** The KnowledgeGraphLoader reads `memory/knowledge-graph/index.md`, matches the task's domain tags against graph node metadata, and returns only the relevant branches — keeping the injected context within the configured token budget (default: 2000 tokens for L4 content). This selective loading reduces prompt token waste by up to 67% compared to injecting the full knowledge base.
+
+**Prompt trust boundary:** Steps 1-4 are system-authored policy/context. Workspace-derived content (shared context, task files, developer notes, existing source snippets) is treated as **untrusted user content**: it is structurally delimited, sanitized before shell/tool use, and cannot widen tool permissions or file access beyond the agent's static frontmatter.
 
 The assembled prompt is written to `memory/sessions/prompt-task-NNN.md` for auditability.
 
@@ -1287,28 +1342,30 @@ Security isolation follows a **tiered model** aligned with the agent hierarchy:
 |-------------|-------------------|-------------------|---------------|-----------|
 | **Maestro (L1)** | tmux pane on host | Full workspace + memory (all levels) | Read/write all 4 levels | Trusted root agent; needs full visibility for orchestration |
 | **Team-Leads (L2..n-1)** | tmux pane on host | Workspace + own domain files + memory (L1-L3) | Write L1-L2; write own domain L3; read-only other L3/L4 | Trusted for domain; debuggable via tmux attach |
-| **Worker-Agents (Ln)** | **Container (Docker/Podman)** with cgroup resource limits (CPU, memory, disk) | Mounted volume: task directory + own memory/sessions/ only | Write L1-L2 only; no L3/L4 write access | Least-privilege; untrusted code execution; resource-limited to prevent runaway consumption |
+| **Worker-Agents (Ln)** | **Container (Docker/Podman)** with cgroup resource limits (CPU, memory, disk) | Mounted volume: assigned workspace root / feature branch (read-write) + shared agent and skill definitions (read-only) | Write L1-L2 only; no L3/L4 write access | Least-privilege; untrusted code execution; resource-limited to prevent runaway consumption |
 
 **Security controls:**
 
 | Concern | Mechanism | Details |
 |---------|-----------|---------|
-| **Process isolation** | Container runtime for Workers; tmux for Leads/Maestro | Workers run in rootless Podman/Docker containers with cgroup limits. The **RuntimeManager** (Section 5.1) selects the runtime based on agent hierarchy level. Dev-mode fallback: all agents in tmux. |
+| **Process isolation** | Container runtime for Workers; tmux for Leads/Maestro | Workers run in a prebuilt rootless Podman/Docker image with default limits of 4 CPU / 8 GB RAM / bounded disk. The **RuntimeManager** (Section 5.1) selects the runtime based on agent hierarchy level. Dev-mode fallback: all agents in tmux. |
 | **File access control** | Domain whitelist in agent frontmatter + runtime enforcement | The `domain` field in frontmatter defines allowed read/upsert/delete path patterns. Enforced by intercepting file operations at the tool-call layer (pre-execution hook). Deny-by-default. |
 | **Memory access control** | MemoryAccessControl component (Section 5.2.2) | Enforces write permissions by hierarchy level. Workers blocked from writing L3/L4. Team-Leads blocked from writing other domains' EXPERT.md. All denials logged. |
-| **Shell injection** | Control character stripping + session ID validation | All shell-bound input is sanitized before execution. tmux session IDs validated against allowlist. |
-| **Secret protection** | OS keychain integration + secret-aware logging | OAuth tokens stored in OS keychain, never in workspace files. Logger redacts known secret patterns from all output. |
+| **Shell injection** | Control character stripping + session ID validation | All shell-bound input is sanitized before execution. tmux session IDs validated against allowlist. Sanitization happens before shell invocation, not only before UI display. |
+| **Secret protection** | Shared AuthStorage + secret-aware logging | Provider credentials are resolved from shared auth storage (environment variables, auth file, or OS keychain) and never written to workspace files. Logger redacts known secret patterns before persisting `log.md`, `logs/*.log`, prompt snapshots, and stored tool output. |
 | **Web server auth** | Bind to localhost + session-bound tokens | Express server binds to 127.0.0.1 only. Session-based authentication tokens with configurable lifetime. Rate limiting on API endpoints. |
-| **Prompt injection** | System/user content separation + sanitization | System prompt sections (policy/rules) separated from user content by structural delimiters. Retrieved workspace content sanitized before injection into agent prompts. |
+| **Prompt injection** | System/user content separation + sanitization | System prompt sections (policy/rules) are separated from user/workspace content by structural delimiters. Retrieved workspace content is treated as hostile input, sanitized before prompt inclusion or shell execution, and cannot expand tool authority. |
+| **High-risk operations** | Static tool permissions + runtime approval boundaries | High-risk capabilities remain governed by agent frontmatter and runtime policy. Retrieved content cannot grant new tools, widen domain access, or bypass approval rules. |
 
 ### 8.6 Observability
 
-| Layer | Current | Target |
-|-------|---------|--------|
-| Activity logging | `workspace/log.md` (markdown table with timestamps) | Correlation IDs per delegation chain |
-| Per-agent logs | `logs/{agent-slug}.log` (piped from Pi stdout/stderr) | Structured JSON logs with API observations |
+| Layer | Current Architecture | Target |
+|-------|----------------------|--------|
+| Activity logging | `workspace/log.md` markdown table with `timestamp`, `level`, `taskId`, `correlationId`, `agent`, `message` | Rich UI filtering and delegation-chain drill-down |
+| Structured events | Machine-readable `LogEvent` stream for monitor/recovery/audit use | SQLite `events` table with retention and query support *[target]* |
+| Per-agent logs | `logs/{agent-slug}.log` redacted stdout/stderr plus runtime observations | Structured JSON logs with provider/API observations |
 | Real-time monitoring | WebSocket broadcast of file changes | SSE endpoint with heartbeat (polling-first, push later) |
-| Pane output streaming | `tmux capture-pane` polled every 2.5s via WebSocket | Direct terminal WebSocket (ttyd or node-pty) |
+| Pane output streaming | `tmux capture-pane` polled every 2.5s via WebSocket; plain-process runtime exposes equivalent output buffer | Direct terminal WebSocket (ttyd or node-pty) |
 | Task tracking | `workspace/status.md` table + individual task files | Dashboard with filters, search, completion metrics |
 | Training/XP tracking | Not implemented | XP event ledger with evidence links (SQLite) *[target]* |
 
@@ -1321,13 +1378,13 @@ stateDiagram-v2
     [*] --> Initializing: delegate() called
     Initializing --> PromptAssembly: Agent resolved, config loaded,\nL3 expertise + L4 graph loaded
     PromptAssembly --> Spawning: Prompt assembled,\nwritten to memory/sessions/
-    Spawning --> Running: Runtime created\n(tmux pane or container),\nSession DAG initialized (L1)
+    Spawning --> Running: Runtime created\n(tmux pane, container,\nor plain process),\nSession DAG initialized (L1)
     Running --> Flushing: Context > 80% budget\n(pre_compaction hook)
     Flushing --> Running: Silent Memory Flush\ncomplete (L1→L2),\nNO_REPLY sentinel
     Running --> PlanReady: Worker sets\nstatus: plan_ready
-    PlanReady --> Running: Lead approves\n(plan_approved)
+    PlanReady --> Spawning: Orchestrator resume\n(plan_approved)
     PlanReady --> PlanRevision: Lead requests\nrevision
-    PlanRevision --> PlanReady: Worker revises
+    PlanRevision --> Spawning: Orchestrator resume\n(phase_1_plan revision)
     Running --> Complete: Task finished,\nhandoff report written
     Running --> Failed: Unrecoverable error,\ntimeout, or crash
     Running --> Stalled: No output for\n> stall_timeout
@@ -1354,14 +1411,15 @@ stateDiagram-v2
 **Lifecycle invariants:**
 - Every agent that reaches `Spawning` must eventually reach either `Complete` or `Failed` -- no silent disappearance
 - **`Flushing`** is a mandatory transition triggered by the `pre_compaction` hook when context exceeds 80% of token budget. The **DailyProtocolFlusher** writes to Level 2; if flush fails, compaction is deferred
+- **`PlanReady`** is terminal for the current planning turn. Resuming work requires the orchestrator to call `resume()` with either `phase_1_plan` (revision) or `phase_2_execute` (approval)
 - **`MemoryPromotion`** is a mandatory transition on `Complete`: Level 1 session is flushed to Level 2, and the **GitCheckpointEngine** creates a `mem:` commit
 - The `monitor` tool is responsible for detecting `Stalled` agents (no new output within configurable `stall_timeout`, default: 120 seconds)
 - On `Failed`, the parent agent receives the error context and can decide to retry, reassign, or escalate
-- Runtime cleanup (tmux pane or container teardown) happens on terminal states (`[*]`)
+- Runtime cleanup (tmux pane, container, or process teardown) happens on terminal states (`[*]`)
 
 **Status determination priority cascade:** When the `monitor` tool checks an agent, it evaluates conditions in strict priority order -- each step falls through gracefully on failure, preserving the current status rather than corrupting state:
 
-1. Runtime alive check (tmux pane exists and process running)
+1. Runtime alive check (runtime handle valid; tmux pane/container/process still alive)
 2. Agent activity detection (new output since last poll)
 3. Task status file check (status field in task markdown)
 4. Stall detection (no activity within `stall_timeout`)
@@ -1374,14 +1432,14 @@ Multi-agent systems are susceptible to hangs, deadlocks, and silent failures. Th
 
 | Layer | Mechanism | Default | Action |
 |-------|-----------|---------|--------|
-| **Agent stall detection** | `monitor` tool polls tmux `capture-pane`; no new output within `stall_timeout` | 120s | Log warning, send nudge message to agent |
+| **Agent stall detection** | `monitor` tool polls runtime output; no new output within `stall_timeout` | 120s | Log warning, send nudge message to agent |
 | **Task timeout** | Per-task `time_budget` in delegation parameters | 600s | Parent receives timeout notification; can kill and reassign |
 | **Wave timeout** | Maximum wall-clock time for all tasks in a wave to complete | 1800s | Maestro kills remaining agents, creates summary of partial results, decides whether to proceed or abort |
-| **Process health check** | tmux `has-session` / pane existence check | 10s interval | Detect crashed agents; mark as `Failed`, notify parent |
+| **Process health check** | Runtime liveness + recent output inspection for fatal errors | 10s interval | Detect crashed agents or dead shells; mark as `Failed`, notify parent |
 | **Recursive depth guard** | Configurable `max_delegation_depth` in system config | 5 levels | Agents at max depth cannot use `delegate` tool; prevents runaway recursion |
-| **Spawn budget** | Maximum concurrent tmux panes per session | 10 panes | New delegation requests queued until a pane becomes available |
+| **Spawn budget** | Maximum concurrent runtime slots per session | 10 | New delegation requests queued until a runtime slot becomes available |
 
-**Bounded retry with escalation:** When an agent encounters a transient failure (e.g., LLM timeout, tool error), the system tracks retry attempts per `(taskId, errorType)`. Escalation triggers when `attempts > maxRetries` (default: 3) or elapsed time exceeds `escalateAfter` duration (default: 300s). Escalation actions: notify parent agent, notify developer via UI, or abort task. Failed retries allow another attempt on the next monitoring cycle without immediate escalation.
+**Bounded retry with escalation:** When an agent encounters a transient failure (e.g., LLM timeout, tool error), the system tracks retry attempts per `(taskId, errorType)`. Escalation triggers when `attempts > maxRetries` (default: 3) or elapsed time exceeds `escalateAfter` duration (default: 300s). Escalation actions are ordered: **nudge -> interrupt/abort current runtime turn -> reassign or fail task**. Failed retries allow another attempt on the next monitoring cycle without immediate escalation.
 
 **Deadlock prevention:**
 - Wave-based scheduling inherently prevents circular dependencies (all wave N tasks are independent)
@@ -1390,17 +1448,17 @@ Multi-agent systems are susceptible to hangs, deadlocks, and silent failures. Th
 
 ### 8.9 Resource Management and Backpressure
 
-Running many concurrent LLM-powered agents can exhaust system resources (CPU, memory, API rate limits, tmux panes). The system implements backpressure at multiple levels:
+Running many concurrent LLM-powered agents can exhaust system resources (CPU, memory, API rate limits, runtime slots). The system implements backpressure at multiple levels:
 
 | Resource | Limit | Backpressure Strategy |
 |----------|-------|-----------------------|
-| **tmux panes** | Configurable max (default: 10) | Queue pending delegations; start next when a pane frees up |
+| **Runtime slots** | Configurable max (default: 10) | Queue pending delegations; start next when a runtime slot frees up |
 | **LLM API calls** | Provider rate limits | Per-provider token bucket with exponential backoff; failover to alternate provider |
 | **File system I/O** | Local disk throughput | Wave-based scheduling naturally batches I/O; no additional throttling needed |
 | **Memory (agent prompts)** | ~50-200K tokens per agent context | Context window management (see 8.10); mental model size monitoring |
 | **Disk (workspace artifacts)** | Local disk space | Log rotation for `logs/*.log`; configurable artifact retention policy *[target]* |
 
-**Spawn queuing:** When the active pane count reaches the configured maximum, new `delegate()` calls enter a FIFO queue. The Maestro processes the queue as agents complete, prioritizing by wave order then task priority. This prevents resource exhaustion while maintaining fairness.
+**Spawn queuing:** When the active runtime slot count reaches the configured maximum, new `delegate()` calls enter a FIFO queue. The Maestro processes the queue as agents complete, prioritizing by wave order then task priority. This prevents resource exhaustion while maintaining fairness.
 
 ### 8.10 Context Window Management
 
@@ -1424,20 +1482,22 @@ LLM context windows are a finite and expensive resource. As agent hierarchies de
 3. **Shared context summarization**: If `workspace/plan.md` or `workspace/status.md` exceed 2000 tokens, a summarized version is injected with a pointer to the full file.
 4. **Sub-agent context isolation**: Each sub-agent receives a fresh context window with only the information relevant to its specific task. Parent context is not inherited wholesale -- only the task description and relevant shared context are passed down. This prevents "context rot" where deep hierarchies accumulate irrelevant information.
 
+**Counting policy:** Token budgeting uses provider-aware counting where available; character-count heuristics are acceptable only as a fallback warning mechanism and are never the authoritative budget gate.
+
 ### 8.11 Concurrent File Access and Conflict Resolution
 
 Multiple agents writing to shared workspace files (especially `status.md` and `log.md`) is a known risk (see Risk #4). The system uses a layered conflict prevention strategy:
 
 | Strategy | Scope | Mechanism |
 |----------|-------|-----------|
-| **Single-writer convention** | `goal.md`, `plan.md` | Only one designated agent writes each file (goal: developer/run.sh; plan: Planning Lead) |
-| **Append-only protocol** | `log.md`, mental models | Agents only append; no reads-modify-writes. File append is atomic on most OS/filesystem combinations for reasonable line lengths |
+| **Single-writer convention** | `goal.md`, `plan.md` | Only one designated owner writes each file at a time (goal: developer/run.sh; plan: developer or Planning Lead, never both concurrently) |
+| **Append-only protocol** | `log.md`, mental models | Logger is the sole writer for `log.md`; memory stores append structured entries. Agents never perform ad-hoc read-modify-write cycles on shared coordination files |
 | **Task file ownership** | `tasks/task-NNN.md` | Each task file has exactly one assigned agent as writer; the lead reads for review |
 | **Status table locking** | `status.md` | The Maestro is the sole writer of the status table. Agents update their own task files; the Maestro reflects status changes into `status.md` during monitoring sweeps |
 | **Domain path restrictions** | Agent frontmatter | `domain.upsert` patterns restrict which file paths each agent can write to, preventing accidental cross-agent file conflicts |
 | **Wave isolation** | Cross-wave artifacts | Agents in different waves operate on different artifacts by design (wave ordering ensures predecessors complete before dependents start) |
 
-**Atomic file writes** *[target]*: For critical state files (`status.md`, `log.md`), use the write-tmp-then-rename pattern: write to a temporary file in the same directory, then atomically rename to the target path. This prevents partial writes from corrupting state if a process crashes mid-write.
+**Atomic file writes:** For critical state files (`status.md`, `log.md`, `plan.md`), use the write-temp-then-rename pattern: write to a temporary file in the same directory, then atomically rename to the target path. This prevents partial writes from corrupting state if a process crashes mid-write.
 
 **Target enhancement** *[target]*: File-level advisory locking using `flock()` or a lightweight lock manager for the remaining edge cases (e.g., two agents in the same wave writing to an overlapping path). Symbol-level locking (AST-aware, as in the Wit protocol) for shared source code files.
 
@@ -1447,15 +1507,15 @@ The system implements defense-in-depth for fault tolerance:
 
 | Scenario | Recovery Mechanism | Details |
 |----------|-------------------|---------|
-| **Maestro crash** | tmux sessions and containers survive; agent processes continue independently | Agents write their results to workspace files regardless of Maestro state. On restart, Maestro reads current state from files. |
+| **Maestro crash** | tmux sessions and containers survive; plain-process fallback is best-effort | Agents write their results to workspace files regardless of Maestro state. On restart, Maestro reads current state from files. |
 | **Maestro session resume** | `run.sh --resume` re-attaches to existing tmux session | Reads `status.md` + task files to reconstruct `ActiveWorkers` map; resumes monitoring from current wave state |
 | **Agent crash (mid-task)** | Health check detects missing pane; parent notified | Parent agent can retry (re-delegate same task), reassign (delegate to different agent), or escalate (mark task as failed, create summary of partial progress) |
 | **LLM provider failure** | Failover chain with exponential backoff | Primary model -> secondary model -> tertiary model. Per ADR-007. Retry with backoff before failover. If all providers fail, task enters `Failed` state with clear error context. |
-| **Runtime unavailable** | tmux: fallback to `nohup` background process. Container: fallback to tmux pane | Loses isolation guarantees but maintains core execution. Agent logs piped to `logs/` directory. |
-| **Agent spawn failure** | Error returned to Maestro/Team-Lead; can retry or reassign | Common causes: tmux pane limit reached (queue and retry), agent definition not found (fail fast with clear error), LLM auth failure (prompt user) |
+| **Runtime unavailable** | Fallback to plain-process runtime behind `AgentRuntime`; container launch may fall back to tmux in dev-mode | Loses attach ergonomics or isolation guarantees, but maintains orchestration semantics and log capture. Agent logs remain piped to `logs/` directory. |
+| **Agent spawn failure** | Error returned to Maestro/Team-Lead; can retry or reassign | Common causes: runtime slot limit reached (queue and retry), agent definition not found (fail fast with clear error), LLM auth failure (prompt user) |
 | **Reconcile failure** | Auto-creates fix-task; loops until validation passes | Maximum retry count (default: 3) prevents infinite loops. After max retries, escalates to user with full error context. |
 | **File corruption** | Workspace files are git-trackable; recovery via git checkout | `workspace/` should be committed at wave boundaries for checkpoint/restore capability |
-| **Stalled agent** | Timeout detection escalation: nudge -> kill -> reassign | See Section 8.8 for timeout ladder |
+| **Stalled agent** | Timeout detection escalation: nudge -> interrupt/abort -> reassign | See Section 8.8 for timeout ladder |
 | **Target: Session restore** *[target]* | Differentiate "not restorable" (409) vs "workspace missing" (422) | Explicit error classification enables appropriate UI responses |
 | **Target: Write-ahead queue** *[target]* | Task queue persisted to disk before execution | Enables checkpoint/restart: on crash, replay queue from last completed task rather than restarting entire session |
 
@@ -1475,7 +1535,7 @@ The multi-agent orchestration process -- delegations, status transitions, handof
 | Handoff report | Structured card (Changes / Patterns / Concerns / Follow-ups) | Task file `## Output` section |
 | Reconciliation | Pass/fail notification with expandable error output | `reconcile` tool result |
 | Memory update | Learning summary with confidence indicator | `update_memory` tool result |
-| Monitoring check-in | Agent activity snapshot with pane output excerpt | `monitor` tool result |
+| Monitoring check-in | Agent activity snapshot with runtime output excerpt | `monitor` tool result |
 
 Each message carries the agent's **avatar**, **role badge** (Maestro / Team-Lead / Worker-Agent), and **team color** (from `multi-team-config.yaml`), making it immediately clear who is communicating with whom and at which hierarchy level.
 
@@ -1498,7 +1558,7 @@ erDiagram
     AGENT_INSTANCE {
         string instance_id PK
         string agent_name FK
-        string tmux_pane_id
+        string runtime_handle_id
         string task_id FK
         string status
         datetime started_at
@@ -1553,9 +1613,12 @@ erDiagram
         string description
         string assigned_to FK
         string status
+        string phase
+        string task_type
         int wave_number
         string[] dependencies
         string parent_task FK
+        string correlation_id
         json handoff_report
     }
 
@@ -1568,7 +1631,7 @@ erDiagram
 
     SESSION {
         string session_id PK
-        string tmux_session_name
+        string runtime_session_ref
         string goal
         datetime started_at
         string status
@@ -1628,11 +1691,14 @@ erDiagram
 
 **Key domain invariants:**
 - An `AGENT_DEFINITION` is static configuration; an `AGENT_INSTANCE` is a running process
-- A `TASK` belongs to exactly one wave and has at most one assigned agent instance
+- A `TASK` belongs to exactly one wave, has at most one assigned agent instance, and its `wave_number` is computed by the Maestro from `dependencies[]`
+- `TASK.phase` may only move `phase_1_plan -> phase_2_execute`; approval or revision always happens between runtime turns, never mid-turn
+- `TASK.status` is authoritative in workspace state; runtime exit codes are secondary evidence, not the canonical task result
 - `MENTAL_MODEL` (Level 3) is append-only -- updates add entries, never remove
 - `SESSION_CONTEXT` (Level 1) is ephemeral -- discarded or archived to `DAILY_PROTOCOL` (Level 2) on agent completion
 - `KNOWLEDGE_GRAPH` (Level 4) nodes are write-accessible only by the Maestro; Team-Leads propose additions via handoffs
 - `DAILY_PROTOCOL` (Level 2) entries are append-only with delta updates -- no monolithic rewrites
+- `HandoffReport` must contain all four required sections and pass lead-level semantic validation before a task can be accepted as complete
 - `XP_EVENT` requires non-null `evidence_refs` (evidence-gating invariant)
 - `SESSION` has configurable `max_depth` and `max_panes` limits enforced at delegation time
 
@@ -1656,6 +1722,17 @@ System configuration follows a layered model with clear precedence:
 - Memory `write_levels` are consistent with hierarchy level (Workers cannot have L3/L4 write access)
 - `model_tier` is valid and consistent with agent role
 - Cross-field constraint: if `delegate: true`, agent must reference at least one potential sub-agent
+
+**Planning precedence and task graph validation:**
+- If `workspace/plan.md` exists, it is parsed as the authoritative plan input for the session
+- If `workspace/plan.md` is absent, the Maestro may request a structured `TaskPlan` from the configured provider stack
+- In both cases, the Maestro validates task schema, dependency references, cycle absence, and plan-gate flags before any delegation begins
+- `wave_number` values are derived by computation, not trusted from external input
+
+**Provider and credential policy:**
+- Provider credentials are resolved from shared auth storage for the whole session; per-agent credential isolation is not part of v1
+- Failover chains are configured centrally and may be referenced by `model_tier_policy` or explicit model IDs
+- Retry and failover thresholds are configuration, but their orchestration semantics are fixed by ADR-007
 
 **Model Tiering Policy:**
 
@@ -1689,18 +1766,18 @@ The system maintains multiple log layers for different audiences:
 
 | Log Layer | Location | Format | Audience | Retention |
 |-----------|----------|--------|----------|-----------|
-| **Activity log** | `workspace/log.md` | Markdown table (timestamp, agent, message) | Developer, all agents | Per-session |
-| **Agent stdout/stderr** | `logs/{agent-slug}.log` | Raw terminal output | Developer (debugging) | Per-session |
-| **Task handoff reports** | `workspace/tasks/task-NNN.md` | Structured markdown (4 sections) | Lead agents, developer | Per-session |
-| **Session prompts** | `memory/sessions/prompt-task-NNN.md` | Full assembled prompt | Auditing, debugging | Per-session |
+| **Activity log** | `workspace/log.md` | Markdown table (`timestamp`, `level`, `taskId`, `correlationId`, `agent`, `message`) | Developer, all agents | Per-session |
+| **Agent stdout/stderr** | `logs/{agent-slug}.log` | Redacted terminal output + runtime observations | Developer (debugging) | Per-session |
+| **Task handoff reports** | `workspace/tasks/task-NNN.md` | Structured markdown (4 required sections + validation metadata) | Lead agents, developer | Per-session |
+| **Session prompts** | `memory/sessions/prompt-task-NNN.md` | Full assembled prompt snapshot, redacted before persistence | Auditing, debugging | Per-session |
 | **Session DAGs** | `memory/sessions/task-NNN.jsonl` | JSONL DAG (Level 1 memory) | Debugging, time-travel | Per-session (archivable) |
 | **Daily protocols** | `memory/daily/YYYY-MM-DD.md` | Episodic memory (Level 2) | Cross-session learning | 30-day retention |
 | **Memory commits** | Git log (`mem:` prefix) | Memory evolution audit trail | Developer, architecture review | Persistent |
 | **Target: Structured events** *[target]* | SQLite `events` table | JSON with correlation IDs | Training pipeline, XP service | Persistent |
 
-**Correlation:** Each delegation chain is traceable via task IDs: `task-001` delegates to `task-003` which creates `task-003-fix-001`. The `log.md` entries reference task IDs, enabling full chain reconstruction.
+**Correlation:** Each delegation carries a concrete `correlation_id` that propagates through task files, log entries, runtime observations, and reconciliation events. Task IDs remain human-friendly (`task-001`, `task-003-fix-001`), while correlation IDs provide machine-stable subtree tracing.
 
-**Target: Correlation IDs** *[target]*: Each delegation will carry a `correlation_id` that propagates through all log entries, task files, and API observations in that delegation subtree. This enables filtering all activity for a specific delegation chain.
+**Persistence rule:** Redaction happens before anything is written to `log.md`, `logs/*.log`, or prompt snapshots. No persisted audit artifact may contain raw provider secrets or unredacted credential material.
 
 ### 8.17 Git-Memory Integration ("Marriage with Git")
 
@@ -1875,9 +1952,9 @@ Where:
 
 ### ADR-005: Plugin-Slot Architecture for Extensibility *[target]*
 
-**Status:** Proposed  
-**Context:** System must support different runtimes (tmux/container/cloud), SCM providers, issue trackers, and notification channels without core coupling.  
-**Decision:** Define stable plugin interfaces for 6 slots: RuntimePlugin, WorkspacePlugin, SCMPlugin, TrackerPlugin, NotifierPlugin, TerminalPlugin. Core depends on interfaces, not implementations.  
+**Status:** Proposed
+**Context:** System must support different runtimes (tmux/container/cloud), SCM providers, issue trackers, and notification channels without core coupling. For the first real runtime, the most immediate extensibility seam is agent execution itself: the orchestration logic must remain independent from Pi, tmux, containers, and plain-process fallbacks.
+**Decision:** Define stable plugin interfaces for 6 slots: RuntimePlugin, WorkspacePlugin, SCMPlugin, TrackerPlugin, NotifierPlugin, TerminalPlugin. Core depends on interfaces, not implementations. Within this model, v1 standardizes a concrete `AgentRuntime` contract and ships `PiRuntime` as the default implementation; broader plugin-slot loading remains a target evolution.
 **Alternatives Considered:**
 - *Monolithic integrations* -- Hardcode each integration into the core. Simpler initially, but every new integration requires core changes and increases coupling.
 - *Microservices per integration* -- Each integration runs as a separate service with its own API. Maximum isolation, but massive overhead for local single-user deployment.
@@ -1888,15 +1965,16 @@ Where:
 - (+) Testable -- mock plugins for unit tests
 - (+) Extensible -- community can add integrations
 - (+) Production-validated pattern -- proven in real-world agent orchestration systems
+- (+) Immediate payoff for v1 -- orchestration can support tmux, container, and plain-process execution without runtime-specific branching in core logic
 - (-) Interface design must be stable -- breaking changes cascade
 - (-) Plugin discovery and loading adds complexity
 - (-) Potential abstraction leakage -- not all runtimes have identical capabilities (e.g., container runtime supports resource limits, tmux does not)
 
 ### ADR-006: Wave-based Scheduling over Free-form Parallel Execution
 
-**Status:** Accepted  
-**Context:** Multiple agents working in parallel can create race conditions on shared artifacts (workspace files, source code). Need a scheduling strategy that balances parallelism with correctness.  
-**Decision:** Tasks are sorted into dependency waves. All tasks in wave N must complete before wave N+1 starts. Within a wave, tasks execute in parallel. Reconciliation runs between waves.  
+**Status:** Accepted
+**Context:** Multiple agents working in parallel can create race conditions on shared artifacts (workspace files, source code). Need a scheduling strategy that balances parallelism with correctness.
+**Decision:** Tasks are sorted into dependency waves. Developers or LLMs provide task nodes plus dependency edges; the Maestro validates the graph, rejects cycles, and computes `wave_number` by stable topological sort. All tasks in wave N must complete before wave N+1 starts. Within a wave, tasks execute in parallel. Reconciliation runs between waves.
 **Alternatives Considered:**
 - *Free-form parallel execution with locking* -- Maximum parallelism, but requires complex file-level locking (symbol-level locking via AST parsing as in Wit protocol). Higher throughput but harder to debug and reason about.
 - *Strict sequential execution* -- One task at a time. Simplest, no race conditions, but extremely slow for independent tasks.
@@ -1907,14 +1985,15 @@ Where:
 - (+) Natural reconciliation points between waves
 - (+) No race conditions within a wave (tasks operate on independent artifacts)
 - (+) Simple implementation -- topological sort into waves
+- (+) Deterministic reruns -- stable ordering aids debugging and repeatability
 - (-) Suboptimal parallelism -- fast tasks in wave N must wait for slow tasks before wave N+1 starts
 - (-) Coarse-grained -- some wave N+1 tasks could safely start before all wave N tasks complete
 
 ### ADR-007: LLM Provider Abstraction with Failover Chain
 
-**Status:** Accepted  
-**Context:** Agents depend on external LLM APIs that may experience outages, rate limits, or degraded performance. A single-provider dependency creates a single point of failure for the entire orchestration system.  
-**Decision:** Each agent definition specifies a primary model and the system supports a configurable failover chain. If the primary provider returns errors (5xx, rate limit, timeout), the system attempts the next provider in the chain before failing the task.  
+**Status:** Accepted
+**Context:** Agents depend on external LLM APIs that may experience outages, rate limits, or degraded performance. A single-provider dependency creates a single point of failure for the entire orchestration system.
+**Decision:** Each agent definition specifies a primary model and the system supports a configurable failover chain. Provider credentials are resolved from shared session-scoped auth storage. If the primary provider returns retryable errors (5xx, rate limit, timeout), the system retries with backoff and then attempts the next provider in the chain before failing the task.
 **Alternatives Considered:**
 - *Single provider, retry-only* -- Retry the same provider with exponential backoff. Simpler, but useless during extended outages.
 - *Load balancing across providers* -- Round-robin or latency-based routing. More complex, and different models have different capabilities/pricing -- not interchangeable for all tasks.
@@ -1922,6 +2001,7 @@ Where:
 **Consequences:**
 - (+) Increased availability -- system continues operating during single-provider outages
 - (+) Rate limit resilience -- can spread load across providers
+- (+) Operational simplicity for v1 -- shared credential resolution avoids per-agent secret distribution
 - (-) Different models produce different quality outputs -- failover may degrade task quality
 - (-) API key management for multiple providers increases configuration complexity
 - (-) Cost unpredictability when failing over to more expensive providers
@@ -1987,18 +2067,21 @@ Quality scenarios follow the arc42-recommended stimulus-response structure: Sour
 
 | ID | Quality Goal | Source | Stimulus | Environment | Expected Response | Metric |
 |----|-------------|--------|----------|-------------|-------------------|--------|
-| QS-01 | Reliability | Maestro | All tasks in a wave complete; session ends | Normal operation | All tmux panes cleaned up; no orphaned processes remain | 0 orphan panes |
+| QS-01 | Reliability | Maestro | All tasks in a wave complete; session ends | Normal operation | All runtime handles are cleaned up; no orphaned tmux panes, containers, or fallback processes remain | 0 orphan runtimes |
 | QS-02 | Reliability | Engineering wave | TypeScript compilation errors in produced code | Post-wave reconciliation | `reconcile("tsc --noEmit")` detects errors, auto-creates fix-tasks, loops until pass | 0 undetected errors; max 3 fix-task iterations |
 | QS-03 | Extensibility | Developer | Wants to add a new worker agent type | Development time | Create agent `.md` file with frontmatter, add to `multi-team-config.yaml`, available on next session | < 30 minutes, 0 code changes |
 | QS-04 | Extensibility | Developer | Wants to add a new domain skill | Development time | Create skill `.md` in `skills/`, reference in agent frontmatter, injected at next delegation | < 10 minutes, 0 code changes |
-| QS-05 | Observability | Developer | Needs to trace a delegation from goal to final output | Post-session review | `log.md` + `status.md` + task files contain complete delegation chain with timestamps and agent identifiers | 100% traceability for all delegations |
+| QS-05 | Observability | Developer | Needs to trace a delegation from goal to final output | Post-session review | `log.md` + `status.md` + task files contain complete delegation chain with timestamps, task IDs, and correlation IDs | 100% traceability for all delegations |
 | QS-06 | Observability | Agent | Task status changes (e.g., pending -> in_progress -> complete) | Runtime, Web UI open | Web UI reflects status change via WebSocket broadcast | < 3 second latency from file write to UI update |
-| QS-07 | Resilience | System | Maestro process crashes mid-wave | Agents running in tmux panes | tmux sessions survive independently; `run.sh --resume` reconstructs state from workspace files; no agent work lost | 0 lost completed work |
+| QS-07 | Resilience | System | Maestro process crashes mid-wave | Agents running in tmux panes or worker containers | Runtime processes survive independently where possible; `run.sh --resume` reconstructs state from workspace files; no agent work lost | 0 lost completed work |
 | QS-08 | Resilience | LLM Provider | Primary API returns 5xx errors or rate limit | Agent mid-task | System retries with backoff, then fails over to secondary provider; task continues without restart | < 30 second recovery time |
 | QS-09 | Security | Agent | Attempts to write to a file path outside its declared `domain.upsert` patterns | Runtime | Pi runtime blocks the write; error logged; agent receives clear error message | 0 unauthorized writes |
-| QS-10 | Security | External | Prompt injection attempt via workspace file content | Agent reading task files | System prompt sections (policy/rules) separated from user content; sanitized before injection into shell commands | 0 successful injections |
-| QS-11 | Performance | Maestro | Wave of 4 parallel agents needs to start | Normal operation, < max_panes | All agents spawned in tmux panes with assembled prompts | < 5 seconds total spawn time |
-| QS-12 | Performance | System | 10+ agents accumulated mental model entries over 50 sessions | Long-running project | Agent prompt assembly completes without exceeding context window; mental model pruned/archived if necessary | < 8000 tokens total prompt size |
+| QS-10 | Security | External | Prompt injection attempt via workspace file content | Agent reading task files | System prompt sections (policy/rules) remain separated from user content; sanitized content cannot widen tool authority or trigger unsafe shell execution | 0 successful injections |
+| QS-11 | Reliability | Lead Agent | Worker task is marked `plan_first: true` | Runtime, phase 1 active | Worker exits after writing plan and setting `plan_ready`; no implementation work occurs until explicit resume in `phase_2_execute` | 0 execution-side file changes before approval |
+| QS-12 | Reliability | Lead Agent | Worker submits incomplete handoff report | Task review | Validation rejects the handoff and the task returns for revision instead of being accepted | 0 accepted tasks with incomplete handoff schema |
+| QS-13 | Security | System | Tool output or provider response contains a secret-like token | Persistence path to `log.md`, `logs/*.log`, or prompt snapshots | Secret redaction occurs before persistence; stored artifacts contain only redacted values | 0 unredacted secrets in persisted audit artifacts |
+| QS-14 | Performance | Maestro | Wave of 4 parallel agents needs to start | Normal operation, < max_panes | All agents spawned through `AgentRuntime` with assembled prompts and valid runtime handles | < 5 seconds total spawn time |
+| QS-15 | Performance | System | 10+ agents accumulated mental model entries over 50 sessions | Long-running project | Agent prompt assembly completes without exceeding context window; mental model pruned/archived if necessary | < 8000 tokens total prompt size |
 
 ---
 
@@ -2010,14 +2093,14 @@ Quality scenarios follow the arc42-recommended stimulus-response structure: Sour
 
 | # | Risk | Probability | Impact | Trigger / Early Warning | Mitigation | Owner |
 |---|------|-------------|--------|------------------------|------------|-------|
-| R1 | **tmux dependency** -- system requires tmux, limiting to Linux/macOS; no Windows support | Medium | High | User reports / adoption metrics | Abstract RuntimePlugin interface (ADR-005); container-based and bare-process alternatives *[target]* | Architecture |
+| R1 | **tmux dependency** -- primary lead/maestro runtime assumes tmux, limiting attach/debug ergonomics on non-tmux environments | Medium | High | User reports / adoption metrics | `AgentRuntime` abstraction with plain-process fallback for local/CI use; container-based and alternative terminal plugins remain evolution paths | Architecture |
 | R2 | **Resource exhaustion** -- runaway Worker-Agent exceeds container limits or Maestro/Lead in tmux consumes excessive resources | Low | High | System monitor shows agent consuming >80% RAM or CPU | Worker-Agents in containers with cgroup limits (CPU, memory, disk); spawn budget for concurrent agents; per-agent `time_budget` as backstop; Maestro/Leads monitored via stall detection | Architecture |
 | R3 | **LLM provider outage** -- API outages or rate limits halt all active agents simultaneously | Medium | High | HTTP 5xx responses or rate limit headers from provider | Model failover chain per ADR-007; exponential backoff; local model support as ultimate fallback *[target]* | Operations |
-| R4 | **Concurrent file writes** -- multiple agents in the same wave write to overlapping files | Medium | Medium | Corrupted `status.md` or `log.md` detected during monitoring | Single-writer convention (see 8.11); file locking *[target]*; wave-based scheduling as primary prevention | Architecture |
+| R4 | **Concurrent file writes** -- multiple agents in the same wave write to overlapping files | Medium | Medium | Corrupted `status.md` or `log.md` detected during monitoring | Single-writer convention (see 8.11); mandatory atomic writes for coordination files; file locking *[target]*; wave-based scheduling as primary prevention | Architecture |
 | R5 | **Context window overflow** -- mental models + skills + shared context exceed LLM context limit | Medium | Medium | Agent responses degrade in quality; truncation errors from LLM API | Token budget monitoring (see 8.10); mental model pruning *[target]*; skill progressive disclosure | Architecture |
 | R6 | **Runaway recursion** -- agent spawns unbounded sub-agents, exhausting panes and API budget | Low | High | Pane count approaching max; delegation depth exceeding expected levels | Configurable `max_delegation_depth` and spawn budget (see 8.8); depth guard in `delegate` tool | Architecture |
-| R7 | **Secret exposure** -- OAuth tokens passed via environment variables could leak into log files, task files, or assembled prompts | Low | High | Secrets appearing in `workspace/log.md` or `sessions/prompt-*.md` | Secret-aware logging (redaction); OS keychain integration *[target]*; never write env vars to workspace files | Security |
-| R8 | **Prompt injection via workspace files** -- malicious content in task files or workspace artifacts could manipulate agent behavior | Low | High | Agent produces unexpected behavior after reading a task file with unusual content | System prompt / user content separation; input sanitization before shell execution (control char stripping); domain path restrictions | Security |
+| R7 | **Secret exposure** -- OAuth tokens passed via environment variables could leak into log files, task files, or assembled prompts | Low | High | Secrets appearing in `workspace/log.md` or `sessions/prompt-*.md` | Secret-aware logging with redaction before persistence; shared auth storage; never write env vars to workspace files | Security |
+| R8 | **Prompt injection via workspace files** -- malicious content in task files or workspace artifacts could manipulate agent behavior | Low | High | Agent produces unexpected behavior after reading a task file with unusual content | System prompt / user content separation; input sanitization before shell execution; static tool/file authority boundaries; domain path restrictions | Security |
 | R9 | **Mental model drift** -- outdated or incorrect patterns persist indefinitely in append-only models, degrading agent quality over time | Medium | Medium | Agent repeatedly follows outdated patterns despite newer corrections | Confidence-based pruning *[target]*; curator agent for knowledge hygiene *[target]*; manual review capability | Quality |
 
 ### 11.2 Technical Debt
@@ -2038,15 +2121,16 @@ Quality scenarios follow the arc42-recommended stimulus-response structure: Sour
 |------|-----------|
 | **Agent** | An AI-powered process with a specific role, system prompt, mental model, skills, and tool permissions. Defined by a Markdown file with YAML frontmatter (`agents/*.md`). |
 | **Agent Definition** | The static configuration of an agent: name, model, expertise path, skills, tool permissions, domain restrictions, and system prompt body. Stored in `agents/*.md`. |
-| **Agent Instance** | A running agent process, bound to a specific tmux pane, task, and session. Tracked in the `ActiveWorkers` map. |
+| **Agent Instance** | A running agent process, bound to a specific runtime handle, task, and session. Tracked in the `ActiveWorkers` map. |
+| **AgentRuntime** | The runtime contract used by the Maestro to launch, resume, monitor, interrupt, and destroy delegated agent executions. `PiRuntime` is the default implementation for v1; tmux/container/plain-process backends live behind this contract. |
 | **ACP** | Anthropic Claude Platform -- OAuth-based API access for Claude models. |
 | **Backpressure** | Resource management strategy that queues new delegation requests when the system reaches capacity (max panes, rate limits). See Section 8.9. |
 | **Context Window** | The finite token budget available to an LLM for a single inference call. Managed via token budget allocation (Section 8.10). |
-| **Correlation ID** *[target]* | A unique identifier propagated through all log entries, task files, and API observations in a delegation subtree. Enables end-to-end tracing. |
-| **Delegation** | The act of spawning a new agent process (in tmux pane or container) with an assembled system prompt (agent body + L3 expertise + L4 knowledge graph branches + skills + shared context + task). Any agent with the `delegate` tool (Maestro, Team-Leads) can delegate, enabling recursive sub-trees of arbitrary depth. |
+| **Correlation ID** | A unique identifier propagated through all log entries, task files, and API observations in a delegation subtree. Enables end-to-end tracing independent of human-friendly task IDs. |
+| **Delegation** | The act of spawning a new agent process through `AgentRuntime` with an assembled system prompt (agent body + L3 expertise + L4 knowledge graph branches + skills + shared context + task). Any agent with the `delegate` tool (Maestro, Team-Leads) can delegate, enabling recursive sub-trees of arbitrary depth. |
 | **Delegation Depth** | The number of levels between the current agent and the Maestro (Level 1). Bounded by `max_delegation_depth` to prevent runaway recursion. |
 | **Failover Chain** | Ordered list of LLM providers to attempt when the primary provider fails. See ADR-007. |
-| **Handoff Report** | A structured task output with four mandatory sections: Changes Made, Patterns Followed, Unresolved Concerns, Suggested Follow-up Tasks. |
+| **Handoff Report** | A structured task output with four mandatory sections: Changes Made, Patterns Followed, Unresolved Concerns, Suggested Follow-up Tasks. It is validated as a lead-level quality gate before task acceptance. |
 | **Knowledge Graph (Level 4)** | The project-wide, cross-agent organizational memory maintained as a hierarchical Markdown mind-map in `memory/knowledge-graph/`. Curated primarily by the Maestro. Selective branch loading reduces token consumption at delegation time. |
 | **Team-Lead (Level 2..n-1)** | An intermediate agent managing a specialized team of sub-agents (e.g., Planning Lead, Engineering Lead). Has the `delegate` tool to spawn sub-agents. Creates domain strategies, manages domain-specific expertise files (`EXPERT.md`), and enforces quality gates. Team-Leads can exist at any depth between the Maestro and the leaf Worker-Agents. |
 | **Maestro (Level 1)** | The root agent in the hierarchy tree. Decomposes goals into tasks, delegates to Team-Leads, monitors progress, runs reconciliation, and manages the central project memory (knowledge graph, Level 4). The Maestro holds the strategic overview and is the sole curator of the cross-agent knowledge graph. |
@@ -2055,15 +2139,17 @@ Quality scenarios follow the arc42-recommended stimulus-response structure: Sour
 | **Meta-Agent** *[target]* | A planned agent that optimizes team composition based on historical mission data, agent skill levels, and quality metrics. |
 | **NotebookLM** | Google's AI notebook tool that answers questions exclusively from user-uploaded documents (source-grounded, no internet search). |
 | **Orchestrator** | Legacy term for the Maestro role, used in earlier versions. Superseded by **Maestro** in v3.0. |
-| **Pi** | A coding agent framework (e.g., `@mariozechner/pi-coding-agent`) that can serve as runtime for agent processes. Provides tool-use, extensions, and session management. One of several possible agent runtime implementations. |
-| **Plan-Approval Gate** | A two-phase quality protocol: (1) worker writes a proposed approach and sets status to `plan_ready`, (2) lead reviews and sets `plan_approved` before worker implements. |
+| **Pi** | The default coding-agent framework for v1 (`@mariozechner/pi-coding-agent`). Provides tool-use, extensions, and session management behind the `AgentRuntime` contract. |
+| **Plan-Approval Gate** | A runtime-enforced two-phase quality protocol: (1) worker runs in `phase_1_plan`, writes a proposed approach, and exits with status `plan_ready`, (2) lead approves or requests revision, and only then does the orchestrator resume the worker in `phase_2_execute`. |
 | **Plugin Slot** *[target]* | A swappable interface for system capabilities. Six slots: Runtime, Workspace, SCM, Tracker, Notifier, Terminal. Each has multiple possible implementations. |
 | **Progressive Disclosure** | Skill injection pattern where only skill descriptions sit in the permanent context; full instructions are loaded on-demand when matched by task type. Prevents prompt pollution. |
 | **Reconciliation** | Running a validation command (e.g., `tsc --noEmit`, `npm test`) after an engineering wave. On failure, automatically creates a fix-task. Loops until pass (max 3 iterations). |
+| **RuntimeHandle** | An opaque runtime reference returned by `AgentRuntime.launch()`. Used for liveness checks, output capture, resumption, interruption, and cleanup. |
 | **Shared Context** | Files injected into every agent's system prompt: `shared-context/README.md` plus workspace state files (goal.md, plan.md, status.md). |
 | **Skill** | A reusable Markdown document (`skills/*.md`) injected into an agent's system prompt at delegation time. Defines domain knowledge and best practices. |
-| **Spawn Budget** | Maximum number of concurrent tmux panes per session. New delegations are queued when the budget is exhausted. |
-| **Stall Detection** | Monitoring mechanism that detects agents producing no output within a configurable timeout. Triggers escalation: nudge -> kill -> reassign. |
+| **Spawn Budget** | Maximum number of concurrent runtime slots per session. New delegations are queued when the budget is exhausted. |
+| **Stall Detection** | Monitoring mechanism that detects agents producing no output within a configurable timeout. Triggers escalation: nudge -> interrupt/abort -> reassign. |
+| **Task Phase** | Execution mode of a task: `phase_1_plan` for plan-only work, or `phase_2_execute` after approval. Phase changes occur only between runtime turns. |
 | **Training Pipeline** *[target]* | A reflection-based improvement process: Outcome Evidence -> Reflection Summary -> Mental Model Update -> Skill Delta -> XP Event. No weight fine-tuning. |
 | **Wave** | A group of tasks with no mutual dependencies that can execute in parallel. Wave N+1 starts only after wave N completes. Reconciliation runs between waves. |
 | **Worker-Agent (Level n)** | A leaf agent that executes atomic tasks in isolated containers (production) or tmux panes (dev mode) and delivers structured handoff reports. Worker-Agents do not have the `delegate` tool by default. Granting `delegate: true` promotes a Worker-Agent to a Team-Lead. |
@@ -2073,7 +2159,7 @@ Quality scenarios follow the arc42-recommended stimulus-response structure: Sour
 | **Session DAG** | A JSONL-based Directed Acyclic Graph (Level 1 memory) that records every message and tool call with `id`/`parentId` for branching. Enables rewind to stable checkpoints without losing history. Managed by SessionDAGManager (Section 5.2.2). See runtime sequence in Section 6.7. |
 | **Memory Subsystem** | A first-class container (Section 5.1, 5.2.2) responsible for operating all four memory levels. Contains: SessionDAGManager, DailyProtocolFlusher, ExpertiseStore, KnowledgeGraphLoader, GitCheckpointEngine, MemoryAccessControl. |
 | **Model Tier** | Classification of LLM usage by agent role: `curator` (Maestro, high-reasoning for memory curation), `lead` (Team-Leads, domain strategy), `worker` (Worker-Agents, cost-effective for atomic tasks). Configured in agent frontmatter and resolved to concrete model IDs via `model_tier_policy` in project config. See Section 8.15. |
-| **RuntimeManager** | Component that selects and manages the execution runtime for agents: tmux panes for Maestro/Team-Leads (debuggable), containers for Worker-Agents (isolated, resource-limited). Dev-mode fallback: all agents in tmux. |
+| **RuntimeManager** | Component that selects and manages the execution runtime for agents: tmux for Maestro/Team-Leads, containers for Worker-Agents, and plain-process fallback when tmux is unavailable. |
 | **ExpertiseStore** | Memory Subsystem component (Section 5.2.2) that manages Level 3 memory: reads/writes MEMORY.md and EXPERT.md per agent, enforces domain locking, and runs confidence-based compaction. |
 | **KnowledgeGraphLoader** | Memory Subsystem component (Section 5.2.2) that manages Level 4 memory: reads the knowledge graph index, selects relevant branches by task domain, and returns a token-budgeted context slice for prompt assembly. |
 | **Write-Ahead Queue** *[target]* | Fault tolerance pattern where task queue is persisted to disk before execution. Enables checkpoint/restart after crashes. |
@@ -2101,7 +2187,7 @@ This section consolidates all planned improvements, potential enhancements ident
 |---|------------|-----------|--------|
 | F6 | ~~**Container-based RuntimePlugin**~~ | Resolved in v3.0: Worker-Agents run in rootless containers (Docker/Podman) with cgroup limits. Maestro/Team-Leads use tmux. See ADR-002 and Section 8.5. | Done |
 | F7 | **Memory Level 3 compaction and pruning** | Confidence-based archival of low-confidence or outdated entries in MEMORY.md/EXPERT.md. Curator agent (ACE Reflector-Curator pattern) for autonomous knowledge hygiene across all 4 memory levels. Resolves R9. | Medium |
-| F8 | **Correlation IDs across delegation chains** | Propagate unique trace ID through all logs, task files, and observations. Enables filtering all activity for a specific delegation subtree. | Medium |
+| F8 | **Correlation-aware observability UI** | Correlation IDs are part of the architecture in v3.1; remaining work is to expose first-class filtering, subtree drill-down, and replay views in the Web UI and structured event backends. | Medium |
 | F9 | **Configurable timeouts and limits** | Extract hardcoded constants (D4) to `multi-team-config.yaml` system section: stall_timeout, wave_timeout, max_panes, max_delegation_depth, time_budget defaults. | Low |
 | F10 | **Git-worktree workspace isolation** | Each agent gets its own git worktree for filesystem isolation. Prevents agents from conflicting on source code. Merge at wave completion. | High |
 
