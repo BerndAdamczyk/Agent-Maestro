@@ -79,7 +79,7 @@ export function classifyFile(relPath: string): FileChangeType {
   if (relPath.includes("workspace/goal.md")) return "goal";
   if (relPath.includes("workspace/plan.md")) return "plan";
   if (relPath.includes("workspace/status.md")) return "status";
-  if (relPath.includes("workspace/log.md")) return "log";
+  if (relPath.includes("workspace/log.md") || relPath.includes("workspace/log.jsonl")) return "log";
   if (relPath.includes("workspace/tasks/")) return "task";
   if (relPath.includes("agents/")) return "agent";
   if (relPath.includes("memory/")) return "memory";

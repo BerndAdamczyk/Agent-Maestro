@@ -52,7 +52,7 @@ export class WebSocketHandler {
    * Broadcast a file change event to all connected clients.
    */
   broadcast(event: FileChangeEvent): void {
-    const msg = JSON.stringify({ ...event, eventType: "file:changed" });
+    const msg = serializeFileChangeEvent(event);
     for (const client of this.wss.clients) {
       if (client.readyState === WebSocket.OPEN) {
         client.send(msg);
@@ -131,4 +131,14 @@ export class WebSocketHandler {
   getClientCount(): number {
     return this.wss.clients.size;
   }
+}
+
+export function serializeFileChangeEvent(event: FileChangeEvent): string {
+  return JSON.stringify({
+    type: "file:changed",
+    fileType: event.type,
+    path: event.path,
+    content: event.content,
+    timestamp: event.timestamp,
+  });
 }

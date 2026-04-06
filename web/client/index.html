@@ -459,56 +459,52 @@ function handleWSEvent(data) {
 
 async function handleFileChange(data) {
   const p = data.path || '';
-  // Reload relevant data based on what changed
-  if (p.includes('task')) {
-    const tasks = await api('/api/tasks');
-    if (tasks) {
-      const oldStatuses = {};
-      for (const t of S.tasks) oldStatuses[t.id] = t.status;
-      S.tasks = tasks;
-      // Detect status changes
-      for (const t of tasks) {
-        if (oldStatuses[t.id] && oldStatuses[t.id] !== t.status) {
-          appendChatMessage({
-            type: 'status_change', agent: t.assignedTo || 'System',
-            ts: t.updatedAt, message: `${t.id} status: ${oldStatuses[t.id]} -> ${t.status}`,
-            status: t.status,
-          });
-        }
-        // New handoff
-        if (t.handoffReport && !S.chatMessages.find(m => m.type === 'handoff' && m.task && m.task.id === t.id)) {
-          appendChatMessage({
-            type: 'handoff', agent: t.assignedTo, ts: t.updatedAt,
-            task: t, report: t.handoffReport,
-          });
-        }
-        // New plan approval needed
-        if (t.proposedApproach && t.status === 'plan_ready' &&
-            !S.chatMessages.find(m => m.type === 'plan_approval' && m.task && m.task.id === t.id)) {
-          appendChatMessage({
-            type: 'plan_approval', agent: t.assignedTo, ts: t.updatedAt, task: t,
-          });
-        }
-      }
-      renderTasks();
-    }
+  const fileType = data.fileType || data.type || '';
+  const shouldReloadTasks = fileType === 'task' || p.includes('workspace/tasks/');
+  const shouldReloadLog = fileType === 'log' || p.includes('workspace/log.');
+  const shouldReloadGoal = fileType === 'goal' || p.includes('workspace/goal.md');
+  const shouldReloadStatus = fileType === 'status' || p.includes('workspace/status.md');
+
+  const requests = [];
+
+  if (shouldReloadTasks) {
+    requests.push(api('/api/tasks').then(tasks => {
+      if (tasks) S.tasks = tasks;
+    }));
   }
-  if (p.includes('log')) {
-    const log = await api('/api/workspace/log');
-    if (log && log.entries) {
-      const oldLen = S.logEntries.length;
-      S.logEntries = log.entries;
-      // Append new entries to chat
-      for (let i = oldLen; i < log.entries.length; i++) {
-        appendChatMessage(classifyLogEntry(log.entries[i]));
-      }
-    }
+
+  if (shouldReloadLog) {
+    requests.push(api('/api/workspace/log').then(log => {
+      if (log && log.entries) S.logEntries = log.entries;
+    }));
   }
-  if (p.includes('goal') || p.includes('status')) {
-    const [goal, session] = await Promise.all([api('/api/workspace/goal'), api('/api/session/active')]);
-    if (goal) S.goal = goal.content || '';
-    if (session) S.session = session;
+
+  if (shouldReloadGoal) {
+    requests.push(api('/api/workspace/goal').then(goal => {
+      if (goal) S.goal = goal.content || '';
+    }));
   }
+
+  if (shouldReloadStatus) {
+    requests.push(api('/api/session/active').then(session => {
+      if (session) S.session = session;
+    }));
+  }
+
+  if (requests.length === 0) {
+    return;
+  }
+
+  await Promise.all(requests);
+
+  if (shouldReloadTasks || shouldReloadLog) {
+    buildChatFromState();
+  }
+
+  if (shouldReloadTasks) {
+    renderTasks();
+  }
+
   renderDashboard();
 }
 
