@@ -88,12 +88,21 @@ export function createWebServer(deps: WebServerDeps) {
     wsHandler,
     fileWatcher,
     start(port: number = 3000, host: string = "127.0.0.1"): Promise<void> {
-      return new Promise((resolve) => {
+      return new Promise((resolve, reject) => {
         fileWatcher.start();
-        server.listen(port, host, () => {
+        const onError = (error: Error) => {
+          server.off("listening", onListening);
+          reject(error);
+        };
+        const onListening = () => {
+          server.off("error", onError);
           console.log(`Web server: http://${host}:${port}`);
           resolve();
-        });
+        };
+
+        server.once("error", onError);
+        server.once("listening", onListening);
+        server.listen(port, host);
       });
     },
     stop(): Promise<void> {

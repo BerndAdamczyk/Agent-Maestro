@@ -12,7 +12,7 @@
 
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
 import { v4 as uuid } from "uuid";
 import { loadConfig, AgentResolver } from "./config.js";
 import { MemorySubsystem } from "./memory/index.js";
@@ -47,6 +47,7 @@ import { HybridAgentRuntime } from "./runtime/hybrid-agent-runtime.js";
 const isResume = process.argv.includes("--resume");
 const rootDir = process.env["MAESTRO_ROOT"] || process.cwd();
 const runtimeMode = (process.env["MAESTRO_RUNTIME"] || "auto").toLowerCase();
+const exitOnIdle = /^(?:1|true|yes)$/i.test(process.env["MAESTRO_EXIT_ON_IDLE"] ?? "");
 
 // ── Bootstrap ────────────────────────────────────────────────────────
 
@@ -96,6 +97,11 @@ async function main() {
   const agentResolver = new AgentResolver(rootDir, config);
   const memory = new MemorySubsystem(rootDir, memoryDir, config.memory);
   memory.initialize();
+
+  if (!isResume && hasExistingSessionState(workspaceDir)) {
+    console.error("Existing workspace session state detected. Start fresh via ./run.sh or use --resume.");
+    process.exit(1);
+  }
 
   const logger = new Logger(workspaceDir);
   logger.initialize();
@@ -403,12 +409,25 @@ async function main() {
     await orchestrationEngine.run(goal);
     logger.logEntry("Maestro", "All planned waves completed", { level: "info" });
     session.status = "completed";
-    await shutdown(0);
   } catch (err: any) {
     logger.logEntry("Maestro", `Orchestration failed: ${err.message}`, { level: "error" });
     session.status = "failed";
-    await shutdown(1);
   }
+
+  const terminalMessage = session.status === "completed"
+    ? "Session completed. Web UI remains available until you stop Maestro."
+    : "Session failed. Web UI remains available for inspection until you stop Maestro.";
+  logger.logEntry("Maestro", terminalMessage, {
+    level: session.status === "completed" ? "info" : "error",
+  });
+  console.log(terminalMessage);
+
+  if (exitOnIdle) {
+    await shutdown(session.status === "completed" ? 0 : 1);
+    return;
+  }
+
+  await new Promise<void>(() => {});
 }
 
 main().catch(err => {
@@ -418,40 +437,34 @@ main().catch(err => {
 
 function createAgentRuntime(mode: string, config: SystemConfig): AgentRuntime {
   const devMode = /^(?:1|true|yes)$/i.test(process.env["MAESTRO_DEV_MODE"] ?? "");
-  const hostRuntime = hasTmuxBinary()
+  const processRuntime = new PlainProcessAgentRuntime(config.limits.max_panes);
+  const tmuxRuntime = hasTmuxBinary()
     ? new TmuxAgentRuntime(new RuntimeManager(config.tmux_session, config.limits.max_panes))
-    : new PlainProcessAgentRuntime(config.limits.max_panes);
+    : processRuntime;
 
   switch (mode) {
     case "auto":
-      if (devMode || !hasDockerRuntime()) {
-        return hostRuntime;
-      }
-      return new HybridAgentRuntime(
-        hostRuntime,
-        new ContainerAgentRuntime(config.limits.max_panes),
-        config.limits.max_panes,
-      );
+      return processRuntime;
     case "dry-run":
     case "dryrun":
       return new DryRunAgentRuntime(config.limits.max_panes);
     case "container":
     case "hybrid":
       if (!hasDockerRuntime()) {
-        console.warn("docker not available, falling back to host runtime");
-        return hostRuntime;
+        console.warn("docker not available, falling back to plain-process runtime");
+        return processRuntime;
       }
       return new HybridAgentRuntime(
-        hostRuntime,
+        processRuntime,
         new ContainerAgentRuntime(config.limits.max_panes),
         config.limits.max_panes,
       );
     case "plain-process":
     case "plain_process":
     case "process":
-      return new PlainProcessAgentRuntime(config.limits.max_panes);
+      return processRuntime;
     case "tmux":
-      return hostRuntime;
+      return tmuxRuntime;
     default:
       throw new Error(`Unsupported runtime '${mode}'. Expected 'auto', 'tmux', 'plain-process', 'container', or 'dry-run'.`);
   }
@@ -473,6 +486,31 @@ function hasDockerRuntime(): boolean {
   } catch {
     return false;
   }
+}
+
+function hasExistingSessionState(workspaceDir: string): boolean {
+  const fileCandidates = [
+    "plan.md",
+    "status.md",
+    "log.md",
+    "log.jsonl",
+  ];
+
+  if (fileCandidates.some(file => existsSync(join(workspaceDir, file)))) {
+    return true;
+  }
+
+  const dirCandidates = [
+    "tasks",
+    "runtime-policies",
+    "runtime-sessions",
+    "runtime-turns",
+  ];
+
+  return dirCandidates.some(dir => {
+    const dirPath = join(workspaceDir, dir);
+    return existsSync(dirPath) && readdirSync(dirPath).length > 0;
+  });
 }
 
 function consumeRuntimeControlSignals(

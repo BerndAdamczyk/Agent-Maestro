@@ -11,6 +11,7 @@ import type {
 } from "../types.js";
 import type { AgentRuntime } from "./agent-runtime.js";
 import { RuntimeManager } from "../runtime-manager.js";
+import { getForwardedProviderEnv, resolvePiAgentDir, resolvePiCommand } from "../pi-runtime-support.js";
 import { appendRuntimeObservation } from "./runtime-log.js";
 import { finalizeRuntimeResult, writeTurnMessage } from "./pi-runtime-common.js";
 
@@ -57,6 +58,7 @@ export class TmuxAgentRuntime implements AgentRuntime {
       taskId: params.taskId,
       launchedAt: startedAt,
     };
+    const piAgentDir = resolvePiAgentDir();
 
     const state: TmuxState = {
       workspaceRoot: params.workspaceRoot,
@@ -66,7 +68,10 @@ export class TmuxAgentRuntime implements AgentRuntime {
       model: params.model,
       allowedTools: params.allowedTools,
       env: {
+        ...getForwardedProviderEnv(),
         ...params.env,
+        PI_BIN: resolvePiCommand(),
+        ...(piAgentDir ? { PI_CODING_AGENT_DIR: piAgentDir } : {}),
         MAESTRO_POLICY_PATH: params.policyManifestPath,
       },
       turnNumber: 0,

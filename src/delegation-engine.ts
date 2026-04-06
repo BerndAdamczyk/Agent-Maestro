@@ -18,6 +18,7 @@ import type { PromptAssembler } from "./prompt-assembler.js";
 import type { TaskManager } from "./task-manager.js";
 import type { Logger } from "./logger.js";
 import type { MemorySubsystem } from "./memory/index.js";
+import { hasPiModelCredentials } from "./pi-runtime-support.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { RuntimePolicyManager } from "./runtime/policy.js";
 
@@ -139,13 +140,14 @@ export class DelegationEngine {
       allowedTools,
       domain: agent.frontmatter.domain,
     });
+    const model = this.pickLaunchModel(agent);
 
     const runtimeHandle = this.runtime.launch({
       agentName: params.agentName,
       taskId: task.id,
       role,
       phase: task.phase,
-      model: agent.frontmatter.model,
+      model,
       systemPrompt: prompt,
       promptFilePath: policy.promptFilePath,
       taskFilePath: this.taskManager.getTaskFilePath(task.id),
@@ -185,7 +187,7 @@ export class DelegationEngine {
 
     this.logger.logEntry(
       "Maestro",
-      `Delegated ${task.id} "${params.taskTitle}" to ${params.agentName} (${runtimeHandle.runtimeType}: ${runtimeHandle.id}, wave: ${params.wave})`,
+      `Delegated ${task.id} "${params.taskTitle}" to ${params.agentName} (${runtimeHandle.runtimeType}: ${runtimeHandle.id}, wave: ${params.wave}, model: ${model})`,
       {
         taskId: task.id,
         correlationId: task.correlationId,
@@ -230,6 +232,30 @@ export class DelegationEngine {
     return Object.entries(agent.frontmatter.tools)
       .filter(([tool, allowed]) => allowed && supportedPiTools.has(tool))
       .map(([tool]) => tool);
+  }
+
+  private pickLaunchModel(agent: AgentDefinition): string {
+    const tierPolicy = this.config.model_tier_policy[agent.frontmatter.model_tier];
+    const candidates = [
+      agent.frontmatter.model,
+      tierPolicy.primary,
+      tierPolicy.fallback,
+    ];
+    const uniqueCandidates = [...new Set(candidates.filter(Boolean))];
+
+    const selected = uniqueCandidates.find(model => hasPiModelCredentials(model))
+      ?? uniqueCandidates[0]
+      ?? agent.frontmatter.model;
+
+    if (selected !== agent.frontmatter.model) {
+      this.logger.logEntry(
+        "Delegation",
+        `Switching ${agent.frontmatter.name} from ${agent.frontmatter.model} to ${selected} based on available Pi credentials`,
+        { level: "warn" },
+      );
+    }
+
+    return selected;
   }
 
   getActiveWorkers(): Map<string, ActiveWorker> {

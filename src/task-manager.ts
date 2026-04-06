@@ -264,7 +264,7 @@ export class TaskManager {
 
     if (task.handoffReport) {
       lines.push(
-        "## Output",
+        "## Handoff Report",
         "",
         "### Changes Made",
         task.handoffReport.changesMade,
@@ -332,7 +332,7 @@ export class TaskManager {
     const deps = get("Dependencies");
 
     let handoffReport: HandoffReport | null = null;
-    if (content.includes("## Output")) {
+    if (content.includes("## Handoff Report") || content.includes("## Output")) {
       handoffReport = {
         changesMade: getSubSection("Changes Made"),
         patternsFollowed: getSubSection("Patterns Followed"),

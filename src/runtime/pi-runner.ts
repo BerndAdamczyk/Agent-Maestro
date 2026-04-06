@@ -5,6 +5,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { resolvePiCommand } from "../pi-runtime-support.js";
 
 interface CliArgs {
   cwd: string;
@@ -40,7 +41,7 @@ async function main(): Promise<void> {
   ];
 
   await new Promise<void>((resolve, reject) => {
-    const child = spawn("pi", piArgs, {
+    const child = spawn(resolvePiCommand(), piArgs, {
       cwd: args.cwd,
       env: process.env,
       stdio: "inherit",

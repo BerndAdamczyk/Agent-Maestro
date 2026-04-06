@@ -121,7 +121,7 @@ export class MonitorEngine {
    */
   isWaveComplete(wave: number): boolean {
     const tasks = this.taskManager.getTasksByWave(wave);
-    return tasks.every(t => t.status === "complete" || t.status === "failed");
+    return tasks.length > 0 && tasks.every(t => t.status === "complete");
   }
 
   /**

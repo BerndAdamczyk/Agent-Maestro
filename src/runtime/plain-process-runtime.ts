@@ -13,6 +13,7 @@ import type {
   RuntimeResult,
 } from "../types.js";
 import type { AgentRuntime } from "./agent-runtime.js";
+import { getForwardedProviderEnv, resolvePiAgentDir, resolvePiCommand } from "../pi-runtime-support.js";
 import { appendRuntimeObservation } from "./runtime-log.js";
 import { finalizeRuntimeResult, splitLines, writeTurnMessage } from "./pi-runtime-common.js";
 
@@ -72,7 +73,10 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
       model: params.model,
       allowedTools: params.allowedTools,
       env: {
+        ...getForwardedProviderEnv(),
         ...params.env,
+        PI_BIN: resolvePiCommand(),
+        ...(resolvePiAgentDir() ? { PI_CODING_AGENT_DIR: resolvePiAgentDir()! } : {}),
         MAESTRO_POLICY_PATH: params.policyManifestPath,
       },
       turnNumber: 0,

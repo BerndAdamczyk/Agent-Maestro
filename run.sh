@@ -9,6 +9,31 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SESSION_NAME="agent-maestro"
 
+archive_workspace() {
+  local workspace_dir="$SCRIPT_DIR/workspace"
+  if [[ ! -d "$workspace_dir" ]]; then
+    return
+  fi
+
+  if find "$workspace_dir" -mindepth 1 -print -quit | grep -q .; then
+    local backup_dir="$SCRIPT_DIR/workspace.bak.$(date +%Y%m%d-%H%M%S)"
+    mv "$workspace_dir" "$backup_dir"
+    echo "Archived existing workspace to $(basename "$backup_dir")"
+  fi
+}
+
+build_maestro_command() {
+  local command="cd '$SCRIPT_DIR' && MAESTRO_ROOT='$SCRIPT_DIR' MAESTRO_DEV_MODE='$DEV_MODE' node dist/src/main.js"
+  if [[ "$RESUME" == "true" ]]; then
+    command="$command --resume"
+  fi
+  printf '%s' "$command"
+}
+
+launch_maestro_window() {
+  tmux new-window -d -t "$SESSION_NAME" -n maestro "$(build_maestro_command)"
+}
+
 usage() {
   echo "Usage: $0 <goal> [options]"
   echo "       $0 --resume"
@@ -38,13 +63,12 @@ if [[ "$RESUME" == "false" && -z "$GOAL" ]]; then
 fi
 
 # Ensure build is up to date
-if [[ ! -f "$SCRIPT_DIR/dist/src/main.js" ]]; then
-  echo "Building TypeScript..."
-  cd "$SCRIPT_DIR" && npm run build
-fi
+echo "Building TypeScript..."
+cd "$SCRIPT_DIR" && npm run build
 
 # Write goal if starting fresh
 if [[ "$RESUME" == "false" ]]; then
+  archive_workspace
   mkdir -p "$SCRIPT_DIR/workspace"
   echo "# Goal" > "$SCRIPT_DIR/workspace/goal.md"
   echo "" >> "$SCRIPT_DIR/workspace/goal.md"
@@ -57,22 +81,24 @@ fi
 if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   if [[ "$RESUME" == "true" ]]; then
     echo "Resuming session '$SESSION_NAME'..."
-    export MAESTRO_RESUME=true
+    if tmux list-windows -t "$SESSION_NAME" -F '#W' | grep -qx 'maestro'; then
+      tmux respawn-window -k -t "$SESSION_NAME:maestro" "$(build_maestro_command)"
+    else
+      launch_maestro_window
+    fi
   else
-    echo "Session '$SESSION_NAME' already exists. Use --resume to re-attach."
-    exit 1
+    echo "Replacing session '$SESSION_NAME' for a fresh run..."
+    tmux kill-session -t "$SESSION_NAME"
+    tmux new-session -d -s "$SESSION_NAME" -n bootstrap
+    launch_maestro_window
+    tmux kill-window -t "$SESSION_NAME:bootstrap"
   fi
 else
   echo "Creating tmux session '$SESSION_NAME'..."
-  tmux new-session -d -s "$SESSION_NAME" -n maestro
+  tmux new-session -d -s "$SESSION_NAME" -n bootstrap
+  launch_maestro_window
+  tmux kill-window -t "$SESSION_NAME:bootstrap"
 fi
-
-# Launch maestro in pane 0
-export MAESTRO_ROOT="$SCRIPT_DIR"
-export MAESTRO_DEV_MODE="$DEV_MODE"
-
-tmux send-keys -t "$SESSION_NAME:maestro" \
-  "cd '$SCRIPT_DIR' && node dist/src/main.js $([ \"$RESUME\" == 'true' ] && echo '--resume')" Enter
 
 echo "Maestro launched in tmux session '$SESSION_NAME'"
 echo "  Attach: tmux attach -t $SESSION_NAME"

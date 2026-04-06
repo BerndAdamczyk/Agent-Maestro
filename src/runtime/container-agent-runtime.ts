@@ -15,6 +15,7 @@ import type {
   RuntimeResult,
 } from "../types.js";
 import type { AgentRuntime } from "./agent-runtime.js";
+import { getForwardedProviderEnv, resolvePiAgentDir } from "../pi-runtime-support.js";
 import { appendRuntimeObservation } from "./runtime-log.js";
 import { finalizeRuntimeResult, splitLines, writeTurnMessage } from "./pi-runtime-common.js";
 
@@ -29,6 +30,7 @@ interface ContainerState {
   model: string;
   allowedTools: string[];
   env: Record<string, string>;
+  piAgentDir: string | null;
   turnNumber: number;
   containerName: string | null;
 }
@@ -83,6 +85,9 @@ export class ContainerAgentRuntime implements AgentRuntime {
       launchedAt: startedAt,
     };
 
+    const hostPiAgentDir = resolvePiAgentDir();
+    const containerPiAgentDir = hostPiAgentDir ? "/tmp/pi-agent" : null;
+
     const state: ContainerState = {
       child: null,
       workspaceRoot: params.workspaceRoot,
@@ -93,9 +98,12 @@ export class ContainerAgentRuntime implements AgentRuntime {
       model: params.model,
       allowedTools: params.allowedTools,
       env: {
+        ...getForwardedProviderEnv(),
         ...params.env,
+        ...(containerPiAgentDir ? { PI_CODING_AGENT_DIR: containerPiAgentDir } : {}),
         MAESTRO_POLICY_PATH: toContainerPath(path.relative(params.workspaceRoot, params.policyManifestPath)),
       },
+      piAgentDir: hostPiAgentDir,
       turnNumber: 0,
       containerName: null,
       result: {
@@ -249,24 +257,12 @@ export class ContainerAgentRuntime implements AgentRuntime {
       "-v",
       `${state.workspaceRoot}:/workspace/repo:${repoMountMode}`,
       ...buildWritableMountArgs(state.workspaceRoot, policy.writeRoots),
+      ...buildPiAgentMountArgs(state.piAgentDir),
       ...buildEnvArgs(state.env),
       this.imageName,
-      "node",
-      "/workspace/repo/dist/src/runtime/pi-runner.js",
-      "--cwd",
-      "/workspace/repo",
-      "--session-file",
-      toContainerPath(path.relative(state.workspaceRoot, state.sessionFilePath)),
-      "--prompt-file",
-      toContainerPath(path.relative(state.workspaceRoot, state.promptFilePath)),
-      "--message-file",
-      toContainerPath(path.relative(state.workspaceRoot, messageFile)),
-      "--model",
-      state.model,
-      "--tools",
-      state.allowedTools.join(","),
-      "--extension",
-      "/workspace/repo/.pi/extensions/maestro-policy.ts",
+      "bash",
+      "-lc",
+      buildContainerRunnerCommand(state, messageFile),
     ];
 
     const child = spawn("docker", dockerArgs, {
@@ -317,12 +313,57 @@ function buildEnvArgs(env: Record<string, string>): string[] {
   return Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
 }
 
+function buildPiAgentMountArgs(hostPiAgentDir: string | null): string[] {
+  if (!hostPiAgentDir) {
+    return [];
+  }
+
+  return [
+    "-v",
+    `${hostPiAgentDir}:/run/maestro/pi-agent:ro`,
+  ];
+}
+
 function toContainerPath(relativePath: string): string {
   const normalized = relativePath.replace(/\\/g, "/");
   if (normalized === "." || normalized === "") {
     return "/workspace/repo";
   }
   return path.posix.join("/workspace/repo", normalized);
+}
+
+function buildContainerRunnerCommand(state: ContainerState, messageFile: string): string {
+  const copyPiAgentDir = state.piAgentDir
+    ? "mkdir -p /tmp/pi-agent && cp -a /run/maestro/pi-agent/. /tmp/pi-agent/ 2>/dev/null || true"
+    : "";
+
+  const runnerArgs = [
+    "node",
+    "/workspace/repo/dist/src/runtime/pi-runner.js",
+    "--cwd",
+    "/workspace/repo",
+    "--session-file",
+    toContainerPath(path.relative(state.workspaceRoot, state.sessionFilePath)),
+    "--prompt-file",
+    toContainerPath(path.relative(state.workspaceRoot, state.promptFilePath)),
+    "--message-file",
+    toContainerPath(path.relative(state.workspaceRoot, messageFile)),
+    "--model",
+    state.model,
+    "--tools",
+    state.allowedTools.join(","),
+    "--extension",
+    "/workspace/repo/.pi/extensions/maestro-policy.ts",
+  ];
+
+  const runnerCommand = runnerArgs.map(shellQuote).join(" ");
+  return [copyPiAgentDir, `exec ${runnerCommand}`]
+    .filter(Boolean)
+    .join(" && ");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function launchMessage(params: AgentRuntimeLaunchParams): string {

@@ -6,6 +6,7 @@
 import { execFileSync } from "node:child_process";
 import type { AgentResolver } from "./config.js";
 import type { Logger } from "./logger.js";
+import { resolvePiCommand } from "./pi-runtime-support.js";
 import { parseTaskPlanDocument } from "./task-plan.js";
 import type { SystemConfig, TaskPlan } from "./types.js";
 
@@ -23,19 +24,26 @@ export class TaskPlanProvider {
   }
 
   generate(goal: string): TaskPlan {
+    const builtinPlan = buildBuiltinTaskPlanIfApplicable(goal);
+    if (builtinPlan) {
+      this.logger.logEntry("Planner", "Using built-in TaskPlan for health-check goal", { level: "info" });
+      return builtinPlan;
+    }
+
     const curatorModels = [
       this.config.model_tier_policy.curator.primary,
       this.config.model_tier_policy.curator.fallback,
     ];
     const uniqueModels = [...new Set(curatorModels)];
-    const prompt = buildPlannerPrompt(goal, this.agentResolver);
+    const prompt = buildPlannerPrompt(extractGoalText(goal), this.agentResolver);
+    const piCommand = resolvePiCommand();
     let lastError: Error | null = null;
 
     for (const model of uniqueModels) {
       try {
         this.logger.logEntry("Planner", `Generating TaskPlan with ${model}`, { level: "info" });
         const output = execFileSync(
-          "pi",
+          piCommand,
           [
             "-p",
             "--no-tools",
@@ -75,22 +83,26 @@ export class TaskPlanProvider {
 }
 
 function buildPlannerPrompt(goal: string, agentResolver: AgentResolver): string {
-  const agents = agentResolver.getAllAgents().map(agent => {
+  const agents = agentResolver.getAllAgents().flatMap(agent => {
     const role = agentResolver.getAgentRole(agent.frontmatter.name);
+    if (role === "maestro") {
+      return [];
+    }
     const domain = agent.frontmatter.memory.domain_lock ?? "unlocked";
-    return [
+    return [[
       `- ${agent.frontmatter.name}`,
       `  role: ${role}`,
       `  model_tier: ${agent.frontmatter.model_tier}`,
       `  delegate: ${agent.frontmatter.tools.delegate}`,
       `  domain_lock: ${domain}`,
       `  upsert: ${agent.frontmatter.domain.upsert.join(", ") || "none"}`,
-    ].join("\n");
+    ].join("\n")];
   });
 
   return [
     "Create a strict JSON TaskPlan for this repository goal.",
     "Output ONLY the JSON object. Do not wrap it in markdown unless absolutely necessary.",
+    "Do not assign implementation tasks to Maestro; Maestro is the orchestrator, not a task assignee.",
     "Requirements:",
     '- schema_version must be 1',
     '- use stable task IDs like "task-001", "task-002", ...',
@@ -127,6 +139,48 @@ function buildPlannerPrompt(goal: string, agentResolver: AgentResolver): string 
     "Goal:",
     goal.trim(),
   ].join("\n");
+}
+
+export function buildBuiltinTaskPlanIfApplicable(goal: string): TaskPlan | null {
+  const normalizedGoal = extractGoalText(goal).trim().toLowerCase();
+  if (!/^(ping|pong|health ?check|smoke ?test)$/.test(normalizedGoal)) {
+    return null;
+  }
+
+  return {
+    schema_version: 1,
+    goal: extractGoalText(goal).trim() || "ping",
+    tasks: [
+      {
+        id: "task-001",
+        title: "Acknowledge ping",
+        description: "Verify the system is responsive by producing a pong acknowledgement file in the workspace.",
+        assigned_to: "Product Manager",
+        task_type: "general",
+        dependencies: [],
+        parent_task: null,
+        plan_first: false,
+        time_budget: 60,
+        acceptance_criteria: [
+          "workspace/pong.md exists",
+          "workspace/pong.md contains the word 'pong'",
+        ],
+      },
+    ],
+    validation_commands: [
+      "test -f workspace/pong.md && grep -qi 'pong' workspace/pong.md && echo 'PASS'",
+    ],
+  };
+}
+
+function extractGoalText(goal: string): string {
+  const lines = goal
+    .split("\n")
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => line !== "# Goal" && !/^_Created:/i.test(line));
+
+  return lines.join("\n");
 }
 
 const PLANNER_SYSTEM_PROMPT = [

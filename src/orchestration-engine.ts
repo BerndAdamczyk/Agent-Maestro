@@ -85,9 +85,17 @@ export class OrchestrationEngine {
       const waveTasks = sortResolvedTasks(plan.tasks).filter(task => task.wave === wave);
       if (waveTasks.length === 0) continue;
 
-      if (this.areTasksTerminal(waveTasks.map(task => task.id))) {
+      const waveTaskIds = waveTasks.map(task => task.id);
+
+      if (this.areTasksComplete(waveTaskIds)) {
         this.session.currentWave = wave;
         continue;
+      }
+
+      const preexistingFailures = this.getFailedTaskIds(waveTaskIds);
+      if (preexistingFailures.length > 0) {
+        this.session.status = "failed";
+        throw new Error(`Wave ${wave} contains failed tasks: ${preexistingFailures.join(", ")}`);
       }
 
       this.session.currentWave = wave;
@@ -95,15 +103,20 @@ export class OrchestrationEngine {
         level: "info",
       });
 
-      const completed = await this.waitForTasks(
-        waveTasks.map(task => task.id),
+      const waitResult = await this.waitForTasks(
+        waveTaskIds,
         this.config.limits.wave_timeout_seconds,
         `wave ${wave}`,
       );
 
-      if (!completed) {
+      if (waitResult.status === "timeout") {
         this.session.status = "failed";
         throw new Error(`Wave ${wave} exceeded the configured timeout`);
+      }
+
+      if (waitResult.status === "failed") {
+        this.session.status = "failed";
+        throw new Error(`Wave ${wave} failed tasks: ${waitResult.failedTaskIds.join(", ")}`);
       }
 
       this.statusManager.refresh();
@@ -139,7 +152,11 @@ export class OrchestrationEngine {
     return resolved;
   }
 
-  private async waitForTasks(taskIds: string[], timeoutSeconds: number, label: string): Promise<boolean> {
+  private async waitForTasks(
+    taskIds: string[],
+    timeoutSeconds: number,
+    label: string,
+  ): Promise<{ status: "complete" | "failed" | "timeout"; failedTaskIds: string[] }> {
     const startedAt = Date.now();
     let waitingForApprovalLogged = false;
 
@@ -147,8 +164,14 @@ export class OrchestrationEngine {
       await this.launchEligibleTasks(taskIds);
       this.statusManager.refresh();
 
-      if (this.areTasksTerminal(taskIds)) {
-        return true;
+      const failedTaskIds = this.getFailedTaskIds(taskIds);
+      if (failedTaskIds.length > 0) {
+        this.interruptActiveTasks(taskIds, `${label} aborted after task failure`);
+        return { status: "failed", failedTaskIds };
+      }
+
+      if (this.areTasksComplete(taskIds)) {
+        return { status: "complete", failedTaskIds: [] };
       }
 
       const tasks = taskIds
@@ -166,12 +189,8 @@ export class OrchestrationEngine {
       }
 
       if ((Date.now() - startedAt) / 1000 > timeoutSeconds) {
-        for (const taskId of taskIds) {
-          const worker = this.delegationEngine.getActiveWorker(taskId);
-          if (!worker) continue;
-          this.runtime.interrupt(worker.runtimeHandle, `${label} timeout exceeded`);
-        }
-        return false;
+        this.interruptActiveTasks(taskIds, `${label} timeout exceeded`);
+        return { status: "timeout", failedTaskIds: [] };
       }
 
       await sleep(2000);
@@ -182,7 +201,7 @@ export class OrchestrationEngine {
     for (const taskId of taskIds) {
       const task = this.taskManager.readTask(taskId);
       if (!task) continue;
-      if (isTerminal(task.status)) continue;
+      if (task.status === "complete" || task.status === "failed") continue;
       if (task.status === "plan_ready") continue;
       if (this.delegationEngine.getActiveWorker(taskId)) continue;
       if (!this.runtime.hasCapacity()) return;
@@ -278,16 +297,24 @@ export class OrchestrationEngine {
       ?? this.config.maestro.name;
   }
 
-  private areTasksTerminal(taskIds: string[]): boolean {
+  private areTasksComplete(taskIds: string[]): boolean {
     return taskIds.every(taskId => {
       const task = this.taskManager.readTask(taskId);
-      return !!task && isTerminal(task.status);
+      return !!task && task.status === "complete" && task.handoffValidation?.status === "valid";
     });
   }
-}
 
-function isTerminal(status: ParsedTask["status"]): boolean {
-  return status === "complete" || status === "failed";
+  private getFailedTaskIds(taskIds: string[]): string[] {
+    return taskIds.filter(taskId => this.taskManager.readTask(taskId)?.status === "failed");
+  }
+
+  private interruptActiveTasks(taskIds: string[], reason: string): void {
+    for (const taskId of taskIds) {
+      const worker = this.delegationEngine.getActiveWorker(taskId);
+      if (!worker) continue;
+      this.runtime.interrupt(worker.runtimeHandle, reason);
+    }
+  }
 }
 
 function sleep(ms: number): Promise<void> {
