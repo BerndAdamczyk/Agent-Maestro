@@ -322,7 +322,7 @@ export class TaskManager {
     };
 
     const getSubSection = (heading: string): string => {
-      const re = new RegExp(`### ${heading}\\n([\\s\\S]*?)(?=\\n### |\\n## |$)`, "m");
+      const re = new RegExp(`### ${heading}\\n\\n?([\\s\\S]*?)(?=\\n### |\\n## |$)`, "m");
       const match = content.match(re);
       return match?.[1]?.trim() ?? "";
     };
