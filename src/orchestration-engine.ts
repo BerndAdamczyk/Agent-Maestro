@@ -94,8 +94,21 @@ export class OrchestrationEngine {
 
       const preexistingFailures = this.getFailedTaskIds(waveTaskIds);
       if (preexistingFailures.length > 0) {
-        this.session.status = "failed";
-        throw new Error(`Wave ${wave} contains failed tasks: ${preexistingFailures.join(", ")}`);
+        this.logger.logEntry(
+          "Maestro",
+          `Wave ${wave} has pre-existing failed tasks: ${preexistingFailures.join(", ")}; attempting remediation`,
+          { level: "warn" },
+        );
+        const remediated = await this.runRemediationLoop(wave, preexistingFailures);
+        if (!remediated) {
+          this.session.status = "failed";
+          throw new Error(`Wave ${wave} pre-existing failures could not be remediated: ${preexistingFailures.join(", ")}`);
+        }
+        // After successful remediation, check if the wave is now complete
+        if (this.areTasksComplete(waveTaskIds)) {
+          this.session.currentWave = wave;
+          continue;
+        }
       }
 
       this.session.currentWave = wave;
@@ -115,8 +128,11 @@ export class OrchestrationEngine {
       }
 
       if (waitResult.status === "failed") {
-        this.session.status = "failed";
-        throw new Error(`Wave ${wave} failed tasks: ${waitResult.failedTaskIds.join(", ")}`);
+        const remediated = await this.runRemediationLoop(wave, waitResult.failedTaskIds);
+        if (!remediated) {
+          this.session.status = "failed";
+          throw new Error(`Wave ${wave} failed tasks after exhausting remediation retries: ${waitResult.failedTaskIds.join(", ")}`);
+        }
       }
 
       this.statusManager.refresh();
@@ -296,6 +312,204 @@ export class OrchestrationEngine {
     return false;
   }
 
+  /**
+   * Remediation loop for failed wave tasks.
+   *
+   * Inspects failed tasks for actionable findings (handoff reports, revision
+   * feedback, validation issues), creates fix tasks, waits for them, then
+   * resets and re-runs the originally failed tasks. Retries up to
+   * max_reconcile_retries times before giving up.
+   */
+  private async runRemediationLoop(
+    wave: number,
+    failedTaskIds: string[],
+  ): Promise<boolean> {
+    const maxAttempts = this.config.limits.max_reconcile_retries;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const findings = this.extractRemediationFindings(failedTaskIds);
+
+      if (findings.length === 0) {
+        this.logger.logEntry(
+          "Remediation",
+          `Wave ${wave} has ${failedTaskIds.length} failed task(s) but no actionable findings to remediate`,
+          { level: "error" },
+        );
+        return false;
+      }
+
+      this.logger.logEntry(
+        "Remediation",
+        `Wave ${wave} attempt ${attempt}/${maxAttempts}: creating ${findings.length} fix task(s) for ${failedTaskIds.join(", ")}`,
+        { level: "warn" },
+      );
+
+      // Create fix tasks
+      const fixTaskIds: string[] = [];
+      for (const finding of findings) {
+        const fixTaskId = `task-fix-${wave}-${attempt}-${fixTaskIds.length + 1}`;
+        this.taskManager.upsertTaskDefinition({
+          taskId: fixTaskId,
+          title: finding.title,
+          description: finding.description,
+          assignedTo: finding.assignTo,
+          taskType: "implementation",
+          acceptanceCriteria: finding.acceptanceCriteria,
+          wave,
+          dependencies: [],
+          parentTask: null,
+          planFirst: false,
+          timeBudget: this.config.limits.task_timeout_seconds,
+        });
+        fixTaskIds.push(fixTaskId);
+
+        this.logger.logEntry(
+          "Remediation",
+          `Created ${fixTaskId} assigned to ${finding.assignTo}: ${finding.title}`,
+          { level: "info", taskId: fixTaskId },
+        );
+      }
+
+      // Wait for fix tasks to complete
+      const fixResult = await this.waitForTasks(
+        fixTaskIds,
+        this.config.limits.wave_timeout_seconds,
+        `remediation wave ${wave} attempt ${attempt}`,
+      );
+
+      if (fixResult.status !== "complete") {
+        this.logger.logEntry(
+          "Remediation",
+          `Fix tasks for wave ${wave} attempt ${attempt} ended with status '${fixResult.status}'`,
+          { level: "error" },
+        );
+        if (attempt >= maxAttempts) return false;
+        continue;
+      }
+
+      // Reset originally failed tasks so they can be re-run
+      for (const taskId of failedTaskIds) {
+        this.taskManager.updateStatus(taskId, "pending");
+        this.logger.logEntry(
+          "Remediation",
+          `Reset ${taskId} to pending for re-evaluation after remediation`,
+          { level: "info", taskId },
+        );
+      }
+
+      // Re-run the originally failed tasks
+      const retryResult = await this.waitForTasks(
+        failedTaskIds,
+        this.config.limits.wave_timeout_seconds,
+        `wave ${wave} retry after remediation attempt ${attempt}`,
+      );
+
+      if (retryResult.status === "complete") {
+        this.logger.logEntry(
+          "Remediation",
+          `Wave ${wave} passed after remediation attempt ${attempt}`,
+          { level: "info" },
+        );
+        return true;
+      }
+
+      if (retryResult.status === "failed" && attempt < maxAttempts) {
+        this.logger.logEntry(
+          "Remediation",
+          `Wave ${wave} still failing after attempt ${attempt}, will retry`,
+          { level: "warn" },
+        );
+        // Update failedTaskIds for next iteration
+        failedTaskIds = retryResult.failedTaskIds;
+        continue;
+      }
+
+      this.logger.logEntry(
+        "Remediation",
+        `Wave ${wave} remediation attempt ${attempt} ended with '${retryResult.status}'`,
+        { level: "error" },
+      );
+    }
+
+    return false;
+  }
+
+  private extractRemediationFindings(
+    failedTaskIds: string[],
+  ): RemediationFinding[] {
+    const findings: RemediationFinding[] = [];
+
+    for (const taskId of failedTaskIds) {
+      const task = this.taskManager.readTask(taskId);
+      if (!task) continue;
+
+      // Collect actionable text from all available sources
+      const sources: string[] = [];
+
+      if (task.handoffReport?.unresolvedConcerns && !isExplicitNone(task.handoffReport.unresolvedConcerns)) {
+        sources.push(task.handoffReport.unresolvedConcerns);
+      }
+
+      if (task.handoffReport?.suggestedFollowups && !isExplicitNone(task.handoffReport.suggestedFollowups)) {
+        sources.push(task.handoffReport.suggestedFollowups);
+      }
+
+      if (task.revisionFeedback) {
+        sources.push(task.revisionFeedback);
+      }
+
+      if (task.handoffValidation?.issues && task.handoffValidation.issues.length > 0) {
+        sources.push(task.handoffValidation.issues.join("\n"));
+      }
+
+      if (sources.length === 0) continue;
+
+      const combinedFindings = sources.join("\n\n");
+      const assignTo = this.pickRemediationAgent(task.assignedTo);
+
+      findings.push({
+        title: `Remediate findings from ${taskId}: ${task.title}`,
+        description: [
+          `Task ${taskId} ("${task.title}") failed with actionable findings that must be resolved before the wave can pass.`,
+          "",
+          "## Findings to Address",
+          "",
+          combinedFindings,
+          "",
+          "## Original Task Context",
+          "",
+          task.description,
+          "",
+          task.handoffReport?.changesMade
+            ? `## Changes Already Made\n\n${task.handoffReport.changesMade}`
+            : "",
+        ].filter(Boolean).join("\n"),
+        assignTo,
+        acceptanceCriteria: [
+          "All findings listed above are resolved in the codebase",
+          `The validation that caused ${taskId} to fail now passes`,
+        ],
+      });
+    }
+
+    return findings;
+  }
+
+  /**
+   * Pick the best agent for remediation. Prefer the original task's assigned
+   * agent if it's a worker/lead (they have the context). Fall back to the
+   * engineering lead or first available lead.
+   */
+  private pickRemediationAgent(originalAgent: string): string {
+    const agent = this.agentResolver.findAgentByName(originalAgent);
+    if (agent) {
+      const role = this.agentResolver.getAgentRole(originalAgent);
+      // Don't assign remediation to maestro itself
+      if (role !== "maestro") return originalAgent;
+    }
+    return this.pickReconciliationAgent();
+  }
+
   private pickReconciliationAgent(): string {
     return this.config.teams.find(team => team.name === "Engineering")?.lead.name
       ?? this.config.teams[0]?.lead.name
@@ -320,6 +534,17 @@ export class OrchestrationEngine {
       this.runtime.interrupt(worker.runtimeHandle, reason);
     }
   }
+}
+
+interface RemediationFinding {
+  title: string;
+  description: string;
+  assignTo: string;
+  acceptanceCriteria: string[];
+}
+
+function isExplicitNone(value: string): boolean {
+  return /^(?:none|none noted|no follow-?ups|no unresolved concerns|n\/a)$/i.test(value.trim());
 }
 
 function sleep(ms: number): Promise<void> {
