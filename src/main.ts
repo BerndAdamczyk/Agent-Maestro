@@ -43,6 +43,8 @@ const isResume = process.argv.includes("--resume");
 const rootDir = process.env["MAESTRO_ROOT"] || process.cwd();
 const runtimeMode = (process.env["MAESTRO_RUNTIME"] || "auto").toLowerCase();
 const exitOnIdle = /^(?:1|true|yes)$/i.test(process.env["MAESTRO_EXIT_ON_IDLE"] ?? "");
+const webHost = process.env["MAESTRO_HOST"]?.trim() || "127.0.0.1";
+const webPort = parsePort(process.env["MAESTRO_PORT"]) ?? 3000;
 
 // ── Bootstrap ────────────────────────────────────────────────────────
 
@@ -141,7 +143,7 @@ async function main() {
     logger,
     getSession: () => session,
   });
-  await webServer.start(3000, "127.0.0.1");
+  await webServer.start(webPort, webHost);
 
   logger.logEntry("Maestro", "Session started", { level: "info" });
   logger.logEntry("Maestro", `Goal: ${goal.split("\n").slice(2, 3).join("").trim()}`, { level: "info" });
@@ -587,6 +589,12 @@ function buildDailyProtocolEntries(
   }
 
   return entries;
+}
+
+function parsePort(raw: string | undefined): number | null {
+  if (!raw) return null;
+  const value = Number.parseInt(raw, 10);
+  return Number.isInteger(value) && value > 0 && value <= 65535 ? value : null;
 }
 
 function checkpointMemory(memory: MemorySubsystem, message: string): void {

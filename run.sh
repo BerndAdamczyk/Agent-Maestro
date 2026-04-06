@@ -7,23 +7,26 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SESSION_NAME="agent-maestro"
+TARGET_ROOT="$(cd "${MAESTRO_TARGET_ROOT:-$SCRIPT_DIR}" && pwd)"
+SESSION_NAME="${MAESTRO_TMUX_SESSION:-agent-maestro}"
+WEB_PORT="${MAESTRO_PORT:-3000}"
+WEB_HOST="${MAESTRO_HOST:-127.0.0.1}"
 
 archive_workspace() {
-  local workspace_dir="$SCRIPT_DIR/workspace"
+  local workspace_dir="$TARGET_ROOT/workspace"
   if [[ ! -d "$workspace_dir" ]]; then
     return
   fi
 
   if find "$workspace_dir" -mindepth 1 -print -quit | grep -q .; then
-    local backup_dir="$SCRIPT_DIR/workspace.bak.$(date +%Y%m%d-%H%M%S)"
+    local backup_dir="$TARGET_ROOT/workspace.bak.$(date +%Y%m%d-%H%M%S)"
     mv "$workspace_dir" "$backup_dir"
     echo "Archived existing workspace to $(basename "$backup_dir")"
   fi
 }
 
 build_maestro_command() {
-  local command="cd '$SCRIPT_DIR' && MAESTRO_ROOT='$SCRIPT_DIR' MAESTRO_DEV_MODE='$DEV_MODE' node dist/src/main.js"
+  local command="cd '$SCRIPT_DIR' && MAESTRO_ROOT='$TARGET_ROOT' MAESTRO_DEV_MODE='$DEV_MODE' MAESTRO_TMUX_SESSION='$SESSION_NAME' MAESTRO_PORT='$WEB_PORT' MAESTRO_HOST='$WEB_HOST' node dist/src/main.js"
   if [[ "$RESUME" == "true" ]]; then
     command="$command --resume"
   fi
@@ -62,19 +65,27 @@ if [[ "$RESUME" == "false" && -z "$GOAL" ]]; then
   usage
 fi
 
+if [[ ! -f "$TARGET_ROOT/multi-team-config.yaml" ]]; then
+  echo "Target repo does not look like an agent-maestro checkout: $TARGET_ROOT"
+  exit 1
+fi
+
 # Ensure build is up to date
 echo "Building TypeScript..."
 cd "$SCRIPT_DIR" && npm run build
+if [[ "$TARGET_ROOT" != "$SCRIPT_DIR" ]]; then
+  cd "$TARGET_ROOT" && npm run build
+fi
 
 # Write goal if starting fresh
 if [[ "$RESUME" == "false" ]]; then
   archive_workspace
-  mkdir -p "$SCRIPT_DIR/workspace"
-  echo "# Goal" > "$SCRIPT_DIR/workspace/goal.md"
-  echo "" >> "$SCRIPT_DIR/workspace/goal.md"
-  echo "$GOAL" >> "$SCRIPT_DIR/workspace/goal.md"
-  echo "" >> "$SCRIPT_DIR/workspace/goal.md"
-  echo "_Created: $(date -Iseconds)_" >> "$SCRIPT_DIR/workspace/goal.md"
+  mkdir -p "$TARGET_ROOT/workspace"
+  echo "# Goal" > "$TARGET_ROOT/workspace/goal.md"
+  echo "" >> "$TARGET_ROOT/workspace/goal.md"
+  echo "$GOAL" >> "$TARGET_ROOT/workspace/goal.md"
+  echo "" >> "$TARGET_ROOT/workspace/goal.md"
+  echo "_Created: $(date -Iseconds)_" >> "$TARGET_ROOT/workspace/goal.md"
 fi
 
 # Create or attach to tmux session
@@ -101,5 +112,7 @@ else
 fi
 
 echo "Maestro launched in tmux session '$SESSION_NAME'"
+echo "  Code launcher: $SCRIPT_DIR"
+echo "  Target repo: $TARGET_ROOT"
 echo "  Attach: tmux attach -t $SESSION_NAME"
-echo "  Web UI: http://localhost:3000"
+echo "  Web UI: http://$WEB_HOST:$WEB_PORT"

@@ -39,6 +39,10 @@ export function loadConfig(rootDir: string): SystemConfig {
   const raw = readFileSync(configPath, "utf-8");
   const parsed = parseYAML(raw) as Record<string, unknown>;
   const config = SystemConfigSchema.parse(parsed);
+  const tmuxSessionOverride = process.env["MAESTRO_TMUX_SESSION"]?.trim();
+  if (tmuxSessionOverride) {
+    config.tmux_session = tmuxSessionOverride;
+  }
 
   // Validate referenced files exist
   validateConfig(rootDir, config);

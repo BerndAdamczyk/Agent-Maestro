@@ -14,7 +14,7 @@
  *  9. Model tier info
  */
 
-import { readFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentDefinition, DelegationParams, SystemConfig } from "./types.js";
 import type { MemorySubsystem } from "./memory/index.js";
@@ -121,10 +121,27 @@ export class PromptAssembler {
     const parts: string[] = [];
     const wsDir = join(this.rootDir, this.config.paths.workspace);
 
-    // shared-context/README.md
-    const readmePath = join(this.rootDir, this.config.paths.shared_context, "README.md");
-    if (existsSync(readmePath)) {
-      parts.push(formatUntrustedWorkspaceSection("Shared Context", readFileSync(readmePath, "utf-8")));
+    const sharedContextDir = join(this.rootDir, this.config.paths.shared_context);
+    if (existsSync(sharedContextDir)) {
+      const sharedContextFiles = readdirSync(sharedContextDir)
+        .filter(file => file.endsWith(".md"))
+        .sort((left, right) => {
+          if (left === "README.md") return -1;
+          if (right === "README.md") return 1;
+          return left.localeCompare(right);
+        });
+
+      for (const file of sharedContextFiles) {
+        const sectionTitle = file === "README.md"
+          ? "Shared Context"
+          : `Shared Context (${file})`;
+        parts.push(
+          formatUntrustedWorkspaceSection(
+            sectionTitle,
+            readFileSync(join(sharedContextDir, file), "utf-8"),
+          ),
+        );
+      }
     }
 
     // Goal
