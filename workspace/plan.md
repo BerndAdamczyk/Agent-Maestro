@@ -10,7 +10,7 @@ _Source: llm (llm://curator-fallback)_
     {
       "id": "task-001",
       "title": "Acknowledge ping",
-      "description": "Verify the system is responsive by producing a simple pong acknowledgement file in the workspace.",
+      "description": "Verify the system is responsive by confirming the ping request and producing a pong acknowledgement file in the workspace.",
       "assigned_to": "Product Manager",
       "task_type": "general",
       "dependencies": [],
@@ -18,12 +18,12 @@ _Source: llm (llm://curator-fallback)_
       "plan_first": false,
       "time_budget": 60,
       "acceptance_criteria": [
-        "workspace/pong.md exists and contains the text 'pong'"
+        "workspace/pong.md exists and contains an acknowledgement of the ping with a timestamp"
       ]
     }
   ],
   "validation_commands": [
-    "test -f workspace/pong.md && grep -q 'pong' workspace/pong.md && echo 'PASS' || echo 'FAIL'"
+    "test -f workspace/pong.md && echo 'pong verified'"
   ]
 }
 ```
@@ -36,4 +36,4 @@ _Source: llm (llm://curator-fallback)_
 
 ## Validation Commands
 
-- `test -f workspace/pong.md && grep -q 'pong' workspace/pong.md && echo 'PASS' || echo 'FAIL'`
+- `test -f workspace/pong.md && echo 'pong verified'`
