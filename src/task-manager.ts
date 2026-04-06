@@ -3,7 +3,7 @@
  * Reference: arc42 Section 5.2.1 (TaskManager), 8.1 (File-based Coordination)
  */
 
-import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type {
@@ -14,7 +14,7 @@ import type {
   HandoffValidation,
 } from "./types.js";
 import { validateHandoffReport } from "./handoff-validator.js";
-import { formatTimestamp } from "./utils.js";
+import { atomicWrite, formatTimestamp } from "./utils.js";
 
 const TASK_ID_RE = /^task-(\d+)\.md$/;
 
@@ -54,6 +54,7 @@ export class TaskManager {
     assignedTo: string;
     taskType?: string;
     acceptanceCriteria?: string[];
+    writeScope?: string[];
     wave: number;
     dependencies?: string[];
     parentTask?: string | null;
@@ -72,6 +73,7 @@ export class TaskManager {
       assignedTo: params.assignedTo,
       taskType: params.taskType ?? "general",
       acceptanceCriteria: params.acceptanceCriteria ?? [],
+      writeScope: params.writeScope ?? [],
       status: "pending",
       phase: params.planFirst ? "phase_1_plan" : "none",
       wave: params.wave,
@@ -98,6 +100,7 @@ export class TaskManager {
     assignedTo: string;
     taskType?: string;
     acceptanceCriteria?: string[];
+    writeScope?: string[];
     wave: number;
     dependencies?: string[];
     parentTask?: string | null;
@@ -114,6 +117,7 @@ export class TaskManager {
     existing.assignedTo = params.assignedTo;
     existing.taskType = params.taskType ?? existing.taskType;
     existing.acceptanceCriteria = params.acceptanceCriteria ?? existing.acceptanceCriteria;
+    existing.writeScope = params.writeScope ?? existing.writeScope;
     existing.wave = params.wave;
     existing.dependencies = params.dependencies ?? [];
     existing.parentTask = params.parentTask ?? null;
@@ -148,7 +152,7 @@ export class TaskManager {
 
   writeTask(task: ParsedTask): void {
     const content = this.serializeTask(task);
-    writeFileSync(this.taskFile(task.id), content, "utf-8");
+    atomicWrite(this.taskFile(task.id), content);
   }
 
   updateStatus(taskId: string, status: TaskStatus): void {
@@ -236,6 +240,7 @@ export class TaskManager {
       `**Phase:** ${task.phase}`,
       `**Plan First:** ${task.planFirst}`,
       `**Time Budget:** ${task.timeBudget}s`,
+      `**Write Scope:** ${task.writeScope.length > 0 ? task.writeScope.join(", ") : "none"}`,
       `**Dependencies:** ${task.dependencies.length > 0 ? task.dependencies.join(", ") : "none"}`,
       `**Parent Task:** ${task.parentTask ?? "none"}`,
       `**Created:** ${task.createdAt}`,
@@ -331,6 +336,7 @@ export class TaskManager {
 
     const titleMatch = content.match(/^# .+?:\s*(.+)$/m);
     const deps = get("Dependencies");
+    const writeScope = get("Write Scope");
 
     let handoffReport: HandoffReport | null = null;
     if (/^## (?:Handoff Report|Handoff|Output)\s*$/m.test(content)) {
@@ -365,6 +371,7 @@ export class TaskManager {
       assignedTo: get("Assigned To"),
       taskType: get("Task Type") || "general",
       acceptanceCriteria: getListSection("Acceptance Criteria"),
+      writeScope: writeScope === "none" || !writeScope ? [] : writeScope.split(",").map(s => s.trim()).filter(Boolean),
       status: (get("Status") || "pending") as TaskStatus,
       phase: (get("Phase") || "none") as TaskPhase,
       wave: parseInt(get("Wave") || "0", 10),

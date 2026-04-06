@@ -139,6 +139,7 @@ export class DelegationEngine {
       taskFilePath: this.taskManager.getTaskFilePath(task.id),
       allowedTools,
       domain: agent.frontmatter.domain,
+      taskWriteScope: task.writeScope,
     });
     const model = this.pickLaunchModel(agent);
 
@@ -214,14 +215,20 @@ export class DelegationEngine {
   /**
    * Mark a worker as completed and clean up.
    */
-  completeWorker(taskId: string): void {
+  completeWorker(taskId: string, outcome: "complete" | "failed" | "interrupted" = "complete"): void {
     const worker = this.activeWorkers.get(taskId);
     if (!worker) return;
 
     this.runtime.destroy(worker.runtimeHandle);
     this.activeWorkers.delete(taskId);
 
-    this.logger.logEntry("Maestro", `Worker completed: ${taskId} (${worker.agentName})`, {
+    const verb = outcome === "complete"
+      ? "completed"
+      : outcome === "failed"
+        ? "failed"
+        : "stopped";
+
+    this.logger.logEntry("Maestro", `Worker ${verb}: ${taskId} (${worker.agentName})`, {
       taskId,
       correlationId: worker.correlationId,
     });

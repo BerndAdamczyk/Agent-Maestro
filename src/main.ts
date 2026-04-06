@@ -25,6 +25,7 @@ import { ReconcileEngine } from "./reconcile-engine.js";
 import { OrchestrationEngine } from "./orchestration-engine.js";
 import { TaskPlanService } from "./task-plan.js";
 import { TaskPlanProvider } from "./task-plan-provider.js";
+import { buildNonTerminalResumeMessage, classifyInactiveRuntime } from "./runtime/inactive-runtime.js";
 import { createAgentRuntime, hasExistingSessionState } from "./startup.js";
 import { createWebServer } from "../web/server/index.js";
 import { formatTimestamp } from "./utils.js";
@@ -250,7 +251,7 @@ async function main() {
             correlationId: task.correlationId,
           });
           checkpointMemory(memory, `${result.taskId} failed`);
-          delegationEngine.completeWorker(result.taskId);
+          delegationEngine.completeWorker(result.taskId, "failed");
           monitorEngine.clearCache(result.taskId);
           continue;
         }
@@ -317,11 +318,69 @@ async function main() {
           appendSessionEvent(memory, result.taskId, `Task reached terminal status: ${result.taskStatus}.`);
           promoteTaskMemory(memory, task, worker.agentName, result.taskStatus);
         }
-        delegationEngine.completeWorker(result.taskId);
+        delegationEngine.completeWorker(result.taskId, result.taskStatus);
         monitorEngine.clearCache(result.taskId);
 
         // Git checkpoint on completion
         checkpointMemory(memory, `${result.taskId} ${result.taskStatus}`);
+      }
+
+      if (!result.runtimeAlive && task && worker) {
+        const runtimeResult = runtime.getResult(worker.runtimeHandle);
+        const disposition = classifyInactiveRuntime({
+          taskStatus: result.taskStatus,
+          exitStatus: runtimeResult?.exitStatus ?? null,
+          retryCount: runtimeResult?.metrics.retryCount ?? 0,
+          maxRetryAttempts: config.limits.max_retry_attempts,
+        });
+
+        if (disposition === "resume_non_terminal") {
+          const retryCount = runtimeResult?.metrics.retryCount ?? 0;
+          const nextTurnNumber = retryCount + 2;
+          appendSessionEvent(
+            memory,
+            result.taskId,
+            `Worker turn ended without terminal task status; resuming turn ${nextTurnNumber}.`,
+          );
+          logger.logEntry(
+            "Monitor",
+            `Agent ${result.agentName} (${result.taskId}) exited cleanly without terminal task status; resuming turn ${nextTurnNumber}`,
+            {
+              level: "warn",
+              taskId: result.taskId,
+              correlationId: task.correlationId,
+            },
+          );
+          runtime.resume(worker.runtimeHandle, {
+            phase: task.phase,
+            message: buildNonTerminalResumeMessage(
+              result.taskId,
+              nextTurnNumber,
+              config.limits.max_retry_attempts,
+            ),
+          });
+          worker.lastOutputAt = new Date();
+          continue;
+        }
+
+        if (disposition === "fail_clean_exit_exhausted") {
+          logger.logEntry("Monitor", `Agent ${result.agentName} (${result.taskId}) exhausted non-terminal turn retries`, {
+            level: "error",
+            taskId: result.taskId,
+            correlationId: task.correlationId,
+          });
+          appendSessionEvent(
+            memory,
+            result.taskId,
+            `Worker exhausted ${config.limits.max_retry_attempts} non-terminal continuation retries; task marked failed.`,
+          );
+          promoteTaskMemory(memory, task, worker.agentName, "failed");
+          taskManager.updateStatus(result.taskId, "failed");
+          checkpointMemory(memory, `${result.taskId} failed`);
+          delegationEngine.completeWorker(result.taskId, "failed");
+          monitorEngine.clearCache(result.taskId);
+          continue;
+        }
       }
 
       // Handle dead runtimes
@@ -344,7 +403,8 @@ async function main() {
         }
         taskManager.updateStatus(result.taskId, "failed");
         checkpointMemory(memory, `${result.taskId} failed`);
-        delegationEngine.completeWorker(result.taskId);
+        delegationEngine.completeWorker(result.taskId, "failed");
+        monitorEngine.clearCache(result.taskId);
       }
     }
 
@@ -370,7 +430,7 @@ async function main() {
         correlationId: task.correlationId,
       });
       checkpointMemory(memory, `${worker.taskId} failed`);
-      delegationEngine.completeWorker(worker.taskId);
+      delegationEngine.completeWorker(worker.taskId, "failed");
       monitorEngine.clearCache(worker.taskId);
     }
 

@@ -154,6 +154,7 @@ export const TaskPlanTaskSchema = z.object({
   plan_first: z.boolean().default(false),
   time_budget: z.number().int().positive().default(600),
   acceptance_criteria: z.array(z.string()).default([]),
+  write_scope: z.array(z.string().min(1)).default([]),
 });
 
 export const TaskPlanSchema = z.object({
@@ -282,6 +283,7 @@ export interface ParsedTask {
   assignedTo: string;
   taskType: string;
   acceptanceCriteria: string[];
+  writeScope: string[];
   status: TaskStatus;
   phase: TaskPhase;
   wave: number;
@@ -434,6 +436,12 @@ export interface RuntimePolicyManifest {
   writeRoots: string[];
   deleteRoots: string[];
 }
+
+export type InactiveRuntimeDisposition =
+  | "respect_terminal_status"
+  | "resume_non_terminal"
+  | "fail_clean_exit_exhausted"
+  | "crash";
 
 // ── Reconciliation Result ────────────────────────────────────────────
 

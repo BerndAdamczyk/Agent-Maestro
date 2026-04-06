@@ -110,6 +110,10 @@ function buildPlannerPrompt(goal: string, agentResolver: AgentResolver): string 
     "- depend on task IDs, never on wave numbers",
     "- plan_first should only be true when a manual plan approval gate is clearly warranted",
     "- tasks should be atomic, executable, and collectively complete the goal",
+    "- every task must declare a non-empty write_scope with the repo-relative files/directories it is allowed to modify",
+    "- same-wave tasks must not overlap write_scope outside workspace/",
+    "- include docs paths explicitly when documentation updates are required; do not hide them in generic prose",
+    "- prefer the smallest practical write_scope over broad roots like src/** when a narrower subtree or file is known",
     "- validation_commands should contain repo-level verification commands when appropriate",
     "",
     "Allowed agents:",
@@ -130,7 +134,8 @@ function buildPlannerPrompt(goal: string, agentResolver: AgentResolver): string 
       "parent_task": null,
       "plan_first": false,
       "time_budget": 600,
-      "acceptance_criteria": ["string"]
+      "acceptance_criteria": ["string"],
+      "write_scope": ["src/runtime/**"]
     }
   ],
   "validation_commands": ["npm run build"]
@@ -164,6 +169,9 @@ export function buildBuiltinTaskPlanIfApplicable(goal: string): TaskPlan | null 
         acceptance_criteria: [
           "workspace/pong.md exists",
           "workspace/pong.md contains the word 'pong'",
+        ],
+        write_scope: [
+          "workspace/pong.md",
         ],
       },
     ],

@@ -67,6 +67,7 @@ export class TaskPlanService {
         plan_first: task.plan_first,
         time_budget: task.time_budget,
         acceptance_criteria: task.acceptance_criteria,
+        write_scope: task.write_scope,
       })),
       validation_commands: plan.validation_commands,
     };
@@ -110,6 +111,7 @@ export class TaskPlanService {
         assignedTo: task.assigned_to,
         taskType: task.task_type,
         acceptanceCriteria: task.acceptance_criteria,
+        writeScope: task.write_scope,
         wave: task.wave,
         dependencies: task.dependencies,
         parentTask: task.parent_task,
@@ -172,6 +174,16 @@ export function resolveTaskPlan(
     }
   }
 
+  if (source === "llm") {
+    const missingWriteScope = plan.tasks
+      .filter(task => task.write_scope.length === 0)
+      .map(task => task.id);
+
+    if (missingWriteScope.length > 0) {
+      throw new Error(`LLM plan tasks must declare write_scope: ${missingWriteScope.join(", ")}`);
+    }
+  }
+
   const assignments = computeWaves(plan.tasks.map(task => ({
     id: task.id,
     dependencies: task.dependencies,
@@ -183,6 +195,8 @@ export function resolveTaskPlan(
     wave: waveByTaskId.get(task.id) ?? 1,
     originalOrder,
   }));
+
+  validateSameWaveWriteScopeOverlap(resolvedTasks);
 
   return {
     source,
@@ -220,4 +234,71 @@ function parseYamlCandidate(content: string): unknown {
 
 function escapeTableCell(value: string): string {
   return value.replace(/\|/g, "/");
+}
+
+function validateSameWaveWriteScopeOverlap(tasks: ResolvedTaskPlanTask[]): void {
+  for (let i = 0; i < tasks.length; i += 1) {
+    for (let j = i + 1; j < tasks.length; j += 1) {
+      const left = tasks[i]!;
+      const right = tasks[j]!;
+
+      if (left.wave !== right.wave) continue;
+
+      const overlap = findOverlappingWriteScope(left.write_scope, right.write_scope);
+      if (!overlap) continue;
+
+      throw new Error(
+        `Tasks ${left.id} and ${right.id} share overlapping write_scope in wave ${left.wave}: ${overlap.left} <-> ${overlap.right}`,
+      );
+    }
+  }
+}
+
+function findOverlappingWriteScope(
+  leftScope: string[],
+  rightScope: string[],
+): { left: string; right: string } | null {
+  for (const left of leftScope) {
+    if (isWorkspaceScope(left)) continue;
+
+    for (const right of rightScope) {
+      if (isWorkspaceScope(right)) continue;
+      if (patternsOverlap(left, right)) {
+        return { left, right };
+      }
+    }
+  }
+
+  return null;
+}
+
+function patternsOverlap(left: string, right: string): boolean {
+  const normalizedLeft = normalizeScopePattern(left);
+  const normalizedRight = normalizeScopePattern(right);
+
+  if (!normalizedLeft || !normalizedRight) return false;
+  if (normalizedLeft === normalizedRight) return true;
+
+  const leftPrefix = staticScopePrefix(normalizedLeft);
+  const rightPrefix = staticScopePrefix(normalizedRight);
+
+  return leftPrefix === rightPrefix
+    || leftPrefix.startsWith(`${rightPrefix}/`)
+    || rightPrefix.startsWith(`${leftPrefix}/`);
+}
+
+function normalizeScopePattern(pattern: string): string {
+  return pattern.trim().replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "");
+}
+
+function staticScopePrefix(pattern: string): string {
+  const wildcardIndex = pattern.search(/[\*\?\[\{]/);
+  const prefix = wildcardIndex >= 0 ? pattern.slice(0, wildcardIndex) : pattern;
+  const normalized = prefix.replace(/\/+$/, "");
+  return normalized || ".";
+}
+
+function isWorkspaceScope(pattern: string): boolean {
+  return normalizeScopePattern(pattern) === "workspace"
+    || normalizeScopePattern(pattern).startsWith("workspace/");
 }

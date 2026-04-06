@@ -25,7 +25,9 @@ export class RuntimePolicyManager {
     taskFilePath: string;
     allowedTools: string[];
     domain: DomainRestrictions;
+    taskWriteScope?: string[];
   }): RuntimePolicyManifest {
+    const effectiveDomain = deriveEffectiveDomain(params.domain, params.taskWriteScope ?? []);
     const policy: RuntimePolicyManifest = {
       schema_version: 1,
       taskId: params.taskId,
@@ -38,10 +40,10 @@ export class RuntimePolicyManager {
       promptFilePath: this.getPromptFilePath(params.taskId),
       denialLogPath: this.getDenialLogPath(),
       allowedTools: params.allowedTools,
-      domain: params.domain,
-      readRoots: computeAuthorityRoots(this.rootDir, params.domain.read),
-      writeRoots: computeAuthorityRoots(this.rootDir, [...params.domain.upsert, ...params.domain.delete]),
-      deleteRoots: computeAuthorityRoots(this.rootDir, params.domain.delete),
+      domain: effectiveDomain,
+      readRoots: computeAuthorityRoots(this.rootDir, effectiveDomain.read),
+      writeRoots: computeAuthorityRoots(this.rootDir, [...effectiveDomain.upsert, ...effectiveDomain.delete]),
+      deleteRoots: computeAuthorityRoots(this.rootDir, effectiveDomain.delete),
     };
 
     mkdirSync(dirname(this.getPolicyManifestPath(params.taskId)), { recursive: true });
@@ -72,6 +74,22 @@ export class RuntimePolicyManager {
   getDenialLogPath(): string {
     return join(this.rootDir, "logs", "policy-denials.jsonl");
   }
+}
+
+function deriveEffectiveDomain(domain: DomainRestrictions, taskWriteScope: string[]): DomainRestrictions {
+  if (taskWriteScope.length === 0) {
+    return domain;
+  }
+
+  return {
+    read: domain.read,
+    upsert: uniquePatterns(["workspace/**", ...taskWriteScope]),
+    delete: domain.delete,
+  };
+}
+
+function uniquePatterns(patterns: string[]): string[] {
+  return [...new Set(patterns.map(pattern => pattern.trim()).filter(Boolean))];
 }
 
 export function computeAuthorityRoots(rootDir: string, patterns: string[]): string[] {

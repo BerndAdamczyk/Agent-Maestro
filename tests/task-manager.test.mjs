@@ -117,3 +117,21 @@ test("createTask uses local ISO timestamps with explicit offsets", () => {
   assert.match(task.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
   assert.match(task.updatedAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
 });
+
+test("createTask persists write scope metadata", () => {
+  const workspaceDir = mkdtempSync(join(tmpdir(), "agent-maestro-task-"));
+  mkdirSync(join(workspaceDir, "tasks"), { recursive: true });
+  const manager = new TaskManager(workspaceDir);
+
+  const task = manager.createTask({
+    title: "Scoped task",
+    description: "Update runtime policy wiring.",
+    assignedTo: "Backend Dev",
+    wave: 2,
+    writeScope: ["src/runtime/**", "docs/arc42-architecture.md"],
+  });
+
+  const parsed = manager.readTask(task.id);
+
+  assert.deepEqual(parsed?.writeScope, ["src/runtime/**", "docs/arc42-architecture.md"]);
+});

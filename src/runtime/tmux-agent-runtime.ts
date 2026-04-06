@@ -246,6 +246,7 @@ function launchMessage(params: AgentRuntimeLaunchParams): string {
     `Start task ${params.taskId} as ${params.agentName}.`,
     `Current phase: ${params.phase}.`,
     "The task is not complete until the task file includes a valid handoff report with all required sections.",
-    "Read the task file first, then execute only the work required for this turn.",
+    "Read the task file first, then continue working until the task reaches a terminal state or you hit a concrete blocker.",
+    "Do not stop after an intermediate progress update, scoping summary, or partial inspection.",
   ].join("\n");
 }
