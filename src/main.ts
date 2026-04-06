@@ -39,6 +39,8 @@ import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { TmuxAgentRuntime } from "./runtime/tmux-agent-runtime.js";
 import { DryRunAgentRuntime } from "./runtime/dry-run-runtime.js";
 import { PlainProcessAgentRuntime } from "./runtime/plain-process-runtime.js";
+import { ContainerAgentRuntime } from "./runtime/container-agent-runtime.js";
+import { HybridAgentRuntime } from "./runtime/hybrid-agent-runtime.js";
 
 // ── CLI Args ─────────────────────────────────────────────────────────
 
@@ -69,7 +71,15 @@ async function main() {
   const memoryDir = join(rootDir, config.paths.memory);
   const logsDir = join(rootDir, config.paths.logs);
 
-  for (const dir of [workspaceDir, join(workspaceDir, "tasks"), memoryDir, logsDir]) {
+  for (const dir of [
+    workspaceDir,
+    join(workspaceDir, "tasks"),
+    join(workspaceDir, "runtime-policies"),
+    join(workspaceDir, "runtime-sessions"),
+    join(workspaceDir, "runtime-turns"),
+    memoryDir,
+    logsDir,
+  ]) {
     mkdirSync(dir, { recursive: true });
   }
 
@@ -200,7 +210,15 @@ async function main() {
     const workers = delegationEngine.getActiveWorkers();
     if (workers.size === 0) return;
 
-    consumeRuntimeControlSignals(workers, taskManager, runtime, logger, memory);
+    consumeRuntimeControlSignals(
+      workers,
+      taskManager,
+      runtime,
+      logger,
+      memory,
+      agentResolver,
+      promptAssembler,
+    );
     const results = monitorEngine.monitorAll(workers);
 
     for (const result of results) {
@@ -399,28 +417,43 @@ main().catch(err => {
 });
 
 function createAgentRuntime(mode: string, config: SystemConfig): AgentRuntime {
+  const devMode = /^(?:1|true|yes)$/i.test(process.env["MAESTRO_DEV_MODE"] ?? "");
+  const hostRuntime = hasTmuxBinary()
+    ? new TmuxAgentRuntime(new RuntimeManager(config.tmux_session, config.limits.max_panes))
+    : new PlainProcessAgentRuntime(config.limits.max_panes);
+
   switch (mode) {
     case "auto":
-      return hasTmuxBinary()
-        ? new TmuxAgentRuntime(new RuntimeManager(config.tmux_session, config.limits.max_panes))
-        : new PlainProcessAgentRuntime(config.limits.max_panes);
+      if (devMode || !hasDockerRuntime()) {
+        return hostRuntime;
+      }
+      return new HybridAgentRuntime(
+        hostRuntime,
+        new ContainerAgentRuntime(config.limits.max_panes),
+        config.limits.max_panes,
+      );
     case "dry-run":
     case "dryrun":
       return new DryRunAgentRuntime(config.limits.max_panes);
+    case "container":
+    case "hybrid":
+      if (!hasDockerRuntime()) {
+        console.warn("docker not available, falling back to host runtime");
+        return hostRuntime;
+      }
+      return new HybridAgentRuntime(
+        hostRuntime,
+        new ContainerAgentRuntime(config.limits.max_panes),
+        config.limits.max_panes,
+      );
     case "plain-process":
     case "plain_process":
     case "process":
       return new PlainProcessAgentRuntime(config.limits.max_panes);
     case "tmux":
-      if (!hasTmuxBinary()) {
-        console.warn("tmux not available, falling back to plain-process runtime");
-        return new PlainProcessAgentRuntime(config.limits.max_panes);
-      }
-      return new TmuxAgentRuntime(
-        new RuntimeManager(config.tmux_session, config.limits.max_panes),
-      );
+      return hostRuntime;
     default:
-      throw new Error(`Unsupported runtime '${mode}'. Expected 'auto', 'tmux', 'plain-process', or 'dry-run'.`);
+      throw new Error(`Unsupported runtime '${mode}'. Expected 'auto', 'tmux', 'plain-process', 'container', or 'dry-run'.`);
   }
 }
 
@@ -433,18 +466,30 @@ function hasTmuxBinary(): boolean {
   }
 }
 
+function hasDockerRuntime(): boolean {
+  try {
+    execFileSync("docker", ["info"], { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function consumeRuntimeControlSignals(
   workers: Map<string, ActiveWorker>,
   taskManager: TaskManager,
   runtime: AgentRuntime,
   logger: Logger,
   memory: MemorySubsystem,
+  agentResolver: AgentResolver,
+  promptAssembler: PromptAssembler,
 ): void {
   for (const [taskId, worker] of workers) {
     const task = taskManager.readTask(taskId);
     if (!task) continue;
 
     if (task.status === "plan_approved") {
+      refreshRuntimePrompt(task, worker.agentName, agentResolver, promptAssembler);
       appendSessionEvent(memory, taskId, "Plan approved by lead; resuming execution phase.");
       runtime.resume(worker.runtimeHandle, {
         phase: "phase_2_execute",
@@ -459,6 +504,7 @@ function consumeRuntimeControlSignals(
     }
 
     if (task.status === "plan_revision_needed") {
+      refreshRuntimePrompt(task, worker.agentName, agentResolver, promptAssembler);
       appendSessionEvent(memory, taskId, `Plan revision requested: ${task.revisionFeedback ?? "No explicit feedback provided."}`);
       runtime.resume(worker.runtimeHandle, {
         phase: "phase_1_plan",
@@ -476,6 +522,32 @@ function consumeRuntimeControlSignals(
       });
     }
   }
+}
+
+function refreshRuntimePrompt(
+  task: ParsedTask,
+  agentName: string,
+  agentResolver: AgentResolver,
+  promptAssembler: PromptAssembler,
+): void {
+  const agent = agentResolver.findAgentByName(agentName);
+  if (!agent) return;
+
+  promptAssembler.assemble(agent, {
+    agentName,
+    taskId: task.id,
+    taskTitle: task.title,
+    taskDescription: task.description,
+    taskType: task.taskType,
+    acceptanceCriteria: task.acceptanceCriteria,
+    phase: task.phase,
+    wave: task.wave,
+    dependencies: task.dependencies,
+    planFirst: task.planFirst,
+    timeBudget: task.timeBudget,
+    parentTaskId: task.parentTask,
+    delegationDepth: Math.max(0, agentResolver.getAgentHierarchyLevel(agentName) - 1),
+  });
 }
 
 function appendSessionEvent(memory: MemorySubsystem, taskId: string, content: string): void {

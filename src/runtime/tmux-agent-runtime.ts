@@ -1,7 +1,8 @@
 /**
- * tmux-backed AgentRuntime implementation.
+ * tmux-backed Pi runtime for Maestro and Team-Leads.
  */
 
+import { join } from "node:path";
 import type {
   AgentRuntimeLaunchParams,
   AgentRuntimeResumeParams,
@@ -10,13 +11,26 @@ import type {
 } from "../types.js";
 import type { AgentRuntime } from "./agent-runtime.js";
 import { RuntimeManager } from "../runtime-manager.js";
-import { sanitizeForShell } from "../utils.js";
 import { appendRuntimeObservation } from "./runtime-log.js";
+import { finalizeRuntimeResult, writeTurnMessage } from "./pi-runtime-common.js";
+
+interface TmuxState {
+  workspaceRoot: string;
+  promptFilePath: string;
+  sessionFilePath: string;
+  policyManifestPath: string;
+  model: string;
+  allowedTools: string[];
+  env: Record<string, string>;
+  turnNumber: number;
+  currentTurnToken: string | null;
+  result: RuntimeResult;
+}
 
 export class TmuxAgentRuntime implements AgentRuntime {
   private manager: RuntimeManager;
+  private states = new Map<string, TmuxState>();
   private results = new Map<string, RuntimeResult>();
-  private workspaceRoots = new Map<string, string>();
 
   constructor(manager: RuntimeManager) {
     this.manager = manager;
@@ -44,47 +58,67 @@ export class TmuxAgentRuntime implements AgentRuntime {
       launchedAt: startedAt,
     };
 
-    this.results.set(paneId, {
-      exitStatus: "running",
-      handoffReportPath: params.taskFilePath,
-      artifacts: [
-        {
-          path: params.taskFilePath,
-          type: "task-file",
-          description: "Task coordination file tracked by the runtime.",
-        },
-      ],
-      metrics: {
-        startedAt,
-        tokenUsage: null,
-        retryCount: 0,
-        failoverCount: 0,
+    const state: TmuxState = {
+      workspaceRoot: params.workspaceRoot,
+      promptFilePath: params.promptFilePath,
+      sessionFilePath: params.sessionFilePath,
+      policyManifestPath: params.policyManifestPath,
+      model: params.model,
+      allowedTools: params.allowedTools,
+      env: {
+        ...params.env,
+        MAESTRO_POLICY_PATH: params.policyManifestPath,
       },
-    });
-    this.workspaceRoots.set(paneId, params.workspaceRoot);
+      turnNumber: 0,
+      currentTurnToken: null,
+      result: {
+        exitStatus: "running",
+        handoffReportPath: params.taskFilePath,
+        artifacts: [
+          {
+            path: params.taskFilePath,
+            type: "task-file",
+            description: "Task coordination file tracked by the tmux runtime.",
+          },
+          {
+            path: params.sessionFilePath,
+            type: "pi-session",
+            description: "Persistent Pi session file for task turns.",
+          },
+          {
+            path: params.policyManifestPath,
+            type: "runtime-policy",
+            description: "Runtime authority manifest consumed by the Pi policy extension.",
+          },
+        ],
+        metrics: {
+          startedAt,
+          tokenUsage: null,
+          retryCount: 0,
+          failoverCount: 0,
+        },
+      },
+    };
 
-    appendRuntimeObservation(
-      params.workspaceRoot,
-      params.agentName,
-      `[tmux runtime] launched task=${params.taskId} timeout_ms=${params.timeoutMs}`,
-    );
-    this.manager.sendKeys(paneId, this.buildLaunchCommand(params));
+    this.states.set(paneId, state);
+    this.results.set(paneId, state.result);
+    this.startTurn(handle, state, params.phase, launchMessage(params));
     return handle;
   }
 
   resume(handle: RuntimeHandle, params: AgentRuntimeResumeParams): void {
-    if (!this.isAlive(handle)) return;
-
-    const message = sanitizeForShell(params.message).trim() || "Resume requested";
-    this.logObservation(handle, `[tmux runtime] resume phase=${params.phase}: ${message}`);
-    this.manager.sendKeys(
-      handle.id,
-      `printf '%s\\n' ${shellQuote(`[runtime resume] phase=${params.phase}`)} && printf '%s\\n' ${shellQuote(message)}`,
-    );
+    const state = this.states.get(handle.id);
+    if (!state || this.isAlive(handle)) return;
+    this.startTurn(handle, state, params.phase, params.message);
   }
 
   isAlive(handle: RuntimeHandle): boolean {
-    return this.manager.isAlive(handle.id);
+    const state = this.states.get(handle.id);
+    if (!state) return false;
+    if (!this.manager.isAlive(handle.id)) return false;
+    if (!state.currentTurnToken) return false;
+    const output = this.manager.capturePane(handle.id, 200);
+    return !output.includes(`__MAESTRO_TURN_END__:${state.currentTurnToken}:`);
   }
 
   getOutput(handle: RuntimeHandle, lines: number = 200): string {
@@ -92,52 +126,78 @@ export class TmuxAgentRuntime implements AgentRuntime {
   }
 
   interrupt(handle: RuntimeHandle, reason: string): void {
-    const result = this.results.get(handle.id);
-    if (result) {
-      this.results.set(handle.id, finalizeResult(result, "interrupted"));
-    }
+    const state = this.states.get(handle.id);
+    if (!state) return;
 
-    if (this.isAlive(handle)) {
-      this.logObservation(handle, `[tmux runtime] interrupt: ${reason}`);
-      this.manager.sendKeys(
-        handle.id,
-        `printf '%s\\n' ${shellQuote(`[runtime interrupt] ${sanitizeForShell(reason)}`)}`,
-      );
-    }
+    appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[tmux runtime] interrupt: ${reason}`);
+    this.manager.sendInterrupt(handle.id);
+    state.result = finalizeRuntimeResult(state.result, "interrupted");
+    this.results.set(handle.id, state.result);
   }
 
   destroy(handle: RuntimeHandle): void {
-    const result = this.results.get(handle.id);
-    if (result && result.exitStatus === "running") {
-      this.results.set(handle.id, finalizeResult(result, "interrupted"));
+    const state = this.states.get(handle.id);
+    if (!state) return;
+
+    if (state.result.exitStatus === "running") {
+      state.result = finalizeRuntimeResult(state.result, "interrupted");
+      this.results.set(handle.id, state.result);
     }
 
-    this.logObservation(handle, "[tmux runtime] destroy");
+    appendRuntimeObservation(state.workspaceRoot, handle.agentName, "[tmux runtime] destroy");
     this.manager.destroyPane(handle.id);
-    this.workspaceRoots.delete(handle.id);
+    this.states.delete(handle.id);
   }
 
   getResult(handle: RuntimeHandle): RuntimeResult | null {
-    return this.results.get(handle.id) ?? null;
+    return this.states.get(handle.id)?.result ?? this.results.get(handle.id) ?? null;
   }
 
-  private buildLaunchCommand(params: AgentRuntimeLaunchParams): string {
-    const toolSummary = params.allowedTools.length > 0
-      ? params.allowedTools.join(", ")
-      : "none";
+  private startTurn(
+    handle: RuntimeHandle,
+    state: TmuxState,
+    phase: string,
+    message: string,
+  ): void {
+    state.turnNumber += 1;
+    state.currentTurnToken = `${handle.taskId}-${state.turnNumber}-${Date.now()}`;
+    state.result = {
+      ...state.result,
+      exitStatus: "running",
+      metrics: {
+        ...state.result.metrics,
+        retryCount: state.turnNumber - 1,
+      },
+    };
+    this.results.set(handle.id, state.result);
 
-    return [
-      `printf '%s\\n' ${shellQuote(`[tmux runtime] agent=${params.agentName} task=${params.taskId}`)}`,
-      `printf '%s\\n' ${shellQuote(`[tmux runtime] prompt_chars=${params.systemPrompt.length} timeout_ms=${params.timeoutMs}`)}`,
-      `printf '%s\\n' ${shellQuote(`[tmux runtime] allowed_tools=${toolSummary}`)}`,
-      `printf '%s\\n' ${shellQuote("[tmux runtime] backend placeholder: integrate Pi runtime here")}`,
-    ].join(" && ");
-  }
+    const messageFile = writeTurnMessage(
+      join(state.workspaceRoot, "workspace", "runtime-turns"),
+      handle.taskId,
+      state.turnNumber,
+      phase,
+      message,
+    );
 
-  private logObservation(handle: RuntimeHandle, message: string): void {
-    const workspaceRoot = this.workspaceRoots.get(handle.id);
-    if (!workspaceRoot) return;
-    appendRuntimeObservation(workspaceRoot, handle.agentName, message);
+    const command = [
+      `printf '%s\\n' ${shellQuote(`__MAESTRO_TURN_START__:${state.currentTurnToken}`)}`,
+      `${buildEnvPrefix(state.env)} ${shellQuote(process.execPath)} ${shellQuote(join(state.workspaceRoot, "dist", "src", "runtime", "pi-runner.js"))}`,
+      `--cwd ${shellQuote(state.workspaceRoot)}`,
+      `--session-file ${shellQuote(state.sessionFilePath)}`,
+      `--prompt-file ${shellQuote(state.promptFilePath)}`,
+      `--message-file ${shellQuote(messageFile)}`,
+      `--model ${shellQuote(state.model)}`,
+      `--tools ${shellQuote(state.allowedTools.join(","))}`,
+      `--extension ${shellQuote(join(state.workspaceRoot, ".pi", "extensions", "maestro-policy.ts"))}`,
+      `; code=$?; printf '%s\\n' ${shellQuote(`__MAESTRO_TURN_END__:${state.currentTurnToken}:`)}\"$code\"`,
+    ].join(" ");
+
+    appendRuntimeObservation(
+      state.workspaceRoot,
+      handle.agentName,
+      `[tmux runtime] turn=${state.turnNumber} phase=${phase} model=${state.model} tools=${state.allowedTools.join(",") || "none"}`,
+    );
+    this.manager.sendKeys(handle.id, command);
   }
 }
 
@@ -145,17 +205,16 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function finalizeResult(result: RuntimeResult, exitStatus: RuntimeResult["exitStatus"]): RuntimeResult {
-  const finishedAt = new Date().toISOString();
-  const startedAt = result.metrics.startedAt;
+function buildEnvPrefix(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([key, value]) => `${key}=${shellQuote(value)}`)
+    .join(" ");
+}
 
-  return {
-    ...result,
-    exitStatus,
-    metrics: {
-      ...result.metrics,
-      finishedAt,
-      durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
-    },
-  };
+function launchMessage(params: AgentRuntimeLaunchParams): string {
+  return [
+    `Start task ${params.taskId} as ${params.agentName}.`,
+    `Current phase: ${params.phase}.`,
+    "Read the task file first, then execute only the work required for this turn.",
+  ].join("\n");
 }

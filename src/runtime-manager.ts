@@ -88,6 +88,10 @@ export class RuntimeManager {
     this.exec(`tmux send-keys -t ${paneId} ${JSON.stringify(sanitized)} Enter`);
   }
 
+  sendInterrupt(paneId: string): void {
+    this.exec(`tmux send-keys -t ${paneId} C-c`);
+  }
+
   /**
    * Capture the current pane output.
    */

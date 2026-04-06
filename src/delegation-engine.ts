@@ -19,6 +19,7 @@ import type { TaskManager } from "./task-manager.js";
 import type { Logger } from "./logger.js";
 import type { MemorySubsystem } from "./memory/index.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
+import { RuntimePolicyManager } from "./runtime/policy.js";
 
 export interface DelegationQueue {
   params: DelegationParams;
@@ -34,6 +35,7 @@ export class DelegationEngine {
   private taskManager: TaskManager;
   private logger: Logger;
   private memory: MemorySubsystem;
+  private policyManager: RuntimePolicyManager;
   private activeWorkers = new Map<string, ActiveWorker>();
   private delegationQueue: DelegationQueue[] = [];
 
@@ -55,6 +57,7 @@ export class DelegationEngine {
     this.taskManager = taskManager;
     this.logger = logger;
     this.memory = memory;
+    this.policyManager = new RuntimePolicyManager(rootDir, config);
   }
 
   /**
@@ -125,14 +128,31 @@ export class DelegationEngine {
       ...params,
       taskId: task.id,
     });
+    const allowedTools = this.getAllowedTools(agent);
+    const role = this.agentResolver.getAgentRole(params.agentName);
+    const policy = this.policyManager.build({
+      taskId: task.id,
+      agentName: params.agentName,
+      role,
+      phase: task.phase,
+      taskFilePath: this.taskManager.getTaskFilePath(task.id),
+      allowedTools,
+      domain: agent.frontmatter.domain,
+    });
 
     const runtimeHandle = this.runtime.launch({
       agentName: params.agentName,
       taskId: task.id,
+      role,
+      phase: task.phase,
+      model: agent.frontmatter.model,
       systemPrompt: prompt,
+      promptFilePath: policy.promptFilePath,
       taskFilePath: this.taskManager.getTaskFilePath(task.id),
+      sessionFilePath: policy.sessionFilePath,
+      policyManifestPath: this.policyManager.getPolicyManifestPath(task.id),
       workspaceRoot: this.rootDir,
-      allowedTools: this.getAllowedTools(agent),
+      allowedTools,
       timeoutMs: params.timeBudget * 1000,
       env: {
         MAESTRO_TASK_ID: task.id,
@@ -206,8 +226,9 @@ export class DelegationEngine {
   }
 
   private getAllowedTools(agent: AgentDefinition): string[] {
+    const supportedPiTools = new Set(["read", "write", "edit", "bash"]);
     return Object.entries(agent.frontmatter.tools)
-      .filter(([, allowed]) => allowed)
+      .filter(([tool, allowed]) => allowed && supportedPiTools.has(tool))
       .map(([tool]) => tool);
   }
 

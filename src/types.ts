@@ -223,8 +223,14 @@ export interface RuntimeResult {
 export interface AgentRuntimeLaunchParams {
   agentName: string;
   taskId: string;
+  role: "maestro" | "lead" | "worker";
+  phase: TaskPhase;
+  model: string;
   systemPrompt: string;
+  promptFilePath: string;
   taskFilePath: string;
+  sessionFilePath: string;
+  policyManifestPath: string;
   workspaceRoot: string;
   allowedTools: string[];
   timeoutMs: number;
@@ -409,6 +415,24 @@ export interface DelegationParams {
   timeBudget: number;
   parentTaskId: string | null;
   delegationDepth: number;
+}
+
+export interface RuntimePolicyManifest {
+  schema_version: number;
+  taskId: string;
+  agentName: string;
+  role: "maestro" | "lead" | "worker";
+  phase: TaskPhase;
+  workspaceRoot: string;
+  taskFilePath: string;
+  sessionFilePath: string;
+  promptFilePath: string;
+  denialLogPath: string;
+  allowedTools: string[];
+  domain: DomainRestrictions;
+  readRoots: string[];
+  writeRoots: string[];
+  deleteRoots: string[];
 }
 
 // ── Reconciliation Result ────────────────────────────────────────────

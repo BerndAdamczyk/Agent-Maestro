@@ -1,9 +1,11 @@
 /**
- * child_process.spawn-backed AgentRuntime fallback.
+ * Host-process Pi runtime.
  * Reference: arc42 Sections 7, 8.12
  */
 
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
+import { join } from "node:path";
 import type {
   AgentRuntimeLaunchParams,
   AgentRuntimeResumeParams,
@@ -12,12 +14,20 @@ import type {
 } from "../types.js";
 import type { AgentRuntime } from "./agent-runtime.js";
 import { appendRuntimeObservation } from "./runtime-log.js";
+import { finalizeRuntimeResult, splitLines, writeTurnMessage } from "./pi-runtime-common.js";
 
 interface ProcessState {
-  child: ChildProcessWithoutNullStreams;
+  child: ChildProcessByStdio<null, Readable, Readable> | null;
   workspaceRoot: string;
   output: string[];
   result: RuntimeResult;
+  promptFilePath: string;
+  sessionFilePath: string;
+  policyManifestPath: string;
+  model: string;
+  allowedTools: string[];
+  env: Record<string, string>;
+  turnNumber: number;
 }
 
 export class PlainProcessAgentRuntime implements AgentRuntime {
@@ -31,11 +41,11 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
   }
 
   ensureReady(): void {
-    // No external dependency required.
+    // No external dependency required beyond node + pi in PATH.
   }
 
   hasCapacity(): boolean {
-    return this.processes.size < this.maxConcurrent;
+    return [...this.processes.values()].filter(state => state.child !== null).length < this.maxConcurrent;
   }
 
   launch(params: AgentRuntimeLaunchParams): RuntimeHandle {
@@ -43,16 +53,6 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
 
     const id = `proc-${String(this.nextId++).padStart(3, "0")}`;
     const startedAt = new Date().toISOString();
-    const shell = process.env["SHELL"] || "/bin/bash";
-
-    const child = spawn(shell, ["-lc", "while IFS= read -r line; do printf '%s\\n' \"$line\"; done"], {
-      cwd: params.workspaceRoot,
-      env: {
-        ...process.env,
-        ...params.env,
-      },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
 
     const handle: RuntimeHandle = {
       id,
@@ -63,9 +63,19 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
     };
 
     const state: ProcessState = {
-      child,
+      child: null,
       workspaceRoot: params.workspaceRoot,
       output: [],
+      promptFilePath: params.promptFilePath,
+      sessionFilePath: params.sessionFilePath,
+      policyManifestPath: params.policyManifestPath,
+      model: params.model,
+      allowedTools: params.allowedTools,
+      env: {
+        ...params.env,
+        MAESTRO_POLICY_PATH: params.policyManifestPath,
+      },
+      turnNumber: 0,
       result: {
         exitStatus: "running",
         handoffReportPath: params.taskFilePath,
@@ -73,7 +83,17 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
           {
             path: params.taskFilePath,
             type: "task-file",
-            description: "Task coordination file tracked by the plain-process runtime.",
+            description: "Task coordination file tracked by the process runtime.",
+          },
+          {
+            path: params.sessionFilePath,
+            type: "pi-session",
+            description: "Persistent Pi session file for task turns.",
+          },
+          {
+            path: params.policyManifestPath,
+            type: "runtime-policy",
+            description: "Runtime authority manifest consumed by the Pi policy extension.",
           },
         ],
         metrics: {
@@ -84,48 +104,22 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
         },
       },
     };
-    this.results.set(id, state.result);
-
-    child.stdout.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf-8");
-      state.output.push(...splitLines(text));
-      appendRuntimeObservation(params.workspaceRoot, params.agentName, text);
-    });
-
-    child.stderr.on("data", (chunk: Buffer) => {
-      const text = chunk.toString("utf-8");
-      state.output.push(...splitLines(text));
-      appendRuntimeObservation(params.workspaceRoot, params.agentName, `[stderr] ${text}`);
-    });
-
-    child.on("exit", (code, signal) => {
-      const exitStatus =
-        signal === "SIGINT" || signal === "SIGTERM"
-          ? "interrupted"
-          : code === 0
-            ? "completed"
-            : "failed";
-
-      state.result = finalizeResult(state.result, exitStatus);
-      this.results.set(id, state.result);
-    });
 
     this.processes.set(id, state);
-    this.writeLine(handle, `[plain-process runtime] launched task=${params.taskId} timeout_ms=${params.timeoutMs}`);
-    this.writeLine(handle, `[plain-process runtime] prompt_chars=${params.systemPrompt.length}`);
-    this.writeLine(handle, `[plain-process runtime] allowed_tools=${params.allowedTools.join(", ") || "none"}`);
-    this.writeLine(handle, "[plain-process runtime] backend placeholder: integrate Pi runtime here");
+    this.results.set(id, state.result);
+    this.startTurn(handle, state, params.phase, launchMessage(params));
     return handle;
   }
 
   resume(handle: RuntimeHandle, params: AgentRuntimeResumeParams): void {
-    this.writeLine(handle, `[plain-process runtime] resume phase=${params.phase}`);
-    this.writeLine(handle, params.message);
+    const state = this.processes.get(handle.id);
+    if (!state || this.isAlive(handle)) return;
+    this.startTurn(handle, state, params.phase, params.message);
   }
 
   isAlive(handle: RuntimeHandle): boolean {
     const state = this.processes.get(handle.id);
-    if (!state) return false;
+    if (!state?.child) return false;
     return state.child.exitCode === null && !state.child.killed;
   }
 
@@ -136,12 +130,14 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
   }
 
   interrupt(handle: RuntimeHandle, reason: string): void {
-    this.writeLine(handle, `[plain-process runtime] interrupt: ${reason}`);
     const state = this.processes.get(handle.id);
     if (!state) return;
 
-    state.child.kill("SIGINT");
-    state.result = finalizeResult(state.result, "interrupted");
+    appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[process runtime] interrupt: ${reason}`);
+    if (state.child && this.isAlive(handle)) {
+      state.child.kill("SIGINT");
+    }
+    state.result = finalizeRuntimeResult(state.result, "interrupted");
     this.results.set(handle.id, state.result);
   }
 
@@ -149,12 +145,14 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
     const state = this.processes.get(handle.id);
     if (!state) return;
 
-    this.writeLine(handle, "[plain-process runtime] destroy");
-    if (this.isAlive(handle)) {
+    if (state.child && this.isAlive(handle)) {
       state.child.kill("SIGTERM");
     }
-    state.result = finalizeResult(state.result, "interrupted");
-    this.results.set(handle.id, state.result);
+    if (state.result.exitStatus === "running") {
+      state.result = finalizeRuntimeResult(state.result, "interrupted");
+      this.results.set(handle.id, state.result);
+    }
+    state.child = null;
     this.processes.delete(handle.id);
   }
 
@@ -162,32 +160,92 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
     return this.processes.get(handle.id)?.result ?? this.results.get(handle.id) ?? null;
   }
 
-  private writeLine(handle: RuntimeHandle, line: string): void {
-    const state = this.processes.get(handle.id);
-    if (!state || !this.isAlive(handle)) return;
+  private startTurn(
+    handle: RuntimeHandle,
+    state: ProcessState,
+    phase: string,
+    message: string,
+  ): void {
+    state.turnNumber += 1;
+    state.result = {
+      ...state.result,
+      exitStatus: "running",
+      metrics: {
+        ...state.result.metrics,
+        retryCount: state.turnNumber - 1,
+      },
+    };
+    this.results.set(handle.id, state.result);
 
-    state.child.stdin.write(line + "\n");
+    const messageFile = writeTurnMessage(
+      join(state.workspaceRoot, "workspace", "runtime-turns"),
+      handle.taskId,
+      state.turnNumber,
+      phase,
+      message,
+    );
+
+    const child = spawn(
+      process.execPath,
+      [
+        join(state.workspaceRoot, "dist", "src", "runtime", "pi-runner.js"),
+        "--cwd",
+        state.workspaceRoot,
+        "--session-file",
+        state.sessionFilePath,
+        "--prompt-file",
+        state.promptFilePath,
+        "--message-file",
+        messageFile,
+        "--model",
+        state.model,
+        "--tools",
+        state.allowedTools.join(","),
+        "--extension",
+        join(state.workspaceRoot, ".pi", "extensions", "maestro-policy.ts"),
+      ],
+      {
+        cwd: state.workspaceRoot,
+        env: {
+          ...process.env,
+          ...state.env,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+
+    state.child = child;
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf-8");
+      state.output.push(...splitLines(text));
+      appendRuntimeObservation(state.workspaceRoot, handle.agentName, text);
+    });
+
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf-8");
+      state.output.push(...splitLines(text));
+      appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[stderr] ${text}`);
+    });
+
+    child.on("exit", code => {
+      state.child = null;
+      state.result = finalizeRuntimeResult(state.result, code === 0 ? "completed" : "failed");
+      this.results.set(handle.id, state.result);
+    });
+
+    appendRuntimeObservation(
+      state.workspaceRoot,
+      handle.agentName,
+      `[process runtime] turn=${state.turnNumber} phase=${phase} model=${state.model} tools=${state.allowedTools.join(",") || "none"}`,
+    );
   }
 }
 
-function finalizeResult(result: RuntimeResult, exitStatus: RuntimeResult["exitStatus"]): RuntimeResult {
-  const finishedAt = new Date().toISOString();
-  const startedAt = result.metrics.startedAt;
-
-  return {
-    ...result,
-    exitStatus,
-    metrics: {
-      ...result.metrics,
-      finishedAt,
-      durationMs: Date.parse(finishedAt) - Date.parse(startedAt),
-    },
-  };
-}
-
-function splitLines(text: string): string[] {
-  return text
-    .split(/\r?\n/)
-    .map(line => line.trimEnd())
-    .filter(Boolean);
+function launchMessage(params: AgentRuntimeLaunchParams): string {
+  return [
+    `Start task ${params.taskId} as ${params.agentName}.`,
+    `Current phase: ${params.phase}.`,
+    "Read the task file first, then execute only the work required for this turn.",
+  ].join("\n");
 }
