@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  buildPiTurnArgs,
   getForwardedProviderEnv,
   hasPiProviderCredentials,
   resolvePiAgentDir,
@@ -13,6 +14,33 @@ import {
 
 test("resolvePiCommand prefers explicit PI_BIN", () => {
   assert.equal(resolvePiCommand({ PI_BIN: "/custom/pi" }), "/custom/pi");
+});
+
+test("buildPiTurnArgs disables extension discovery and loads only the explicit runtime extension", () => {
+  const args = buildPiTurnArgs({
+    sessionFile: "/tmp/session.jsonl",
+    model: "openai-codex/gpt-5.4",
+    prompt: "system prompt",
+    tools: "read,write,edit,bash",
+    extension: "/tmp/maestro-policy-extension.js",
+    message: "Complete the current task turn.",
+  });
+
+  assert.deepEqual(args, [
+    "-p",
+    "--no-extensions",
+    "--session",
+    "/tmp/session.jsonl",
+    "--model",
+    "openai-codex/gpt-5.4",
+    "--system-prompt",
+    "system prompt",
+    "--tools",
+    "read,write,edit,bash",
+    "--extension",
+    "/tmp/maestro-policy-extension.js",
+    "Complete the current task turn.",
+  ]);
 });
 
 test("getForwardedProviderEnv keeps supported credentials only", () => {

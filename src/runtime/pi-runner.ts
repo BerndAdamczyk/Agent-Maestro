@@ -5,7 +5,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { resolvePiCommand } from "../pi-runtime-support.js";
+import { buildPiTurnArgs, resolvePiCommand } from "../pi-runtime-support.js";
 
 interface CliArgs {
   cwd: string;
@@ -25,20 +25,14 @@ async function main(): Promise<void> {
   const prompt = readFileSync(args.promptFile, "utf-8");
   const message = readFileSync(args.messageFile, "utf-8").trim() || DEFAULT_MESSAGE;
 
-  const piArgs = [
-    "-p",
-    "--session",
-    args.sessionFile,
-    "--model",
-    args.model,
-    "--system-prompt",
+  const piArgs = buildPiTurnArgs({
+    sessionFile: args.sessionFile,
+    model: args.model,
     prompt,
-    "--tools",
-    args.tools,
-    "--extension",
-    args.extension,
+    tools: args.tools,
+    extension: args.extension,
     message,
-  ];
+  });
 
   await new Promise<void>((resolve, reject) => {
     const child = spawn(resolvePiCommand(), piArgs, {

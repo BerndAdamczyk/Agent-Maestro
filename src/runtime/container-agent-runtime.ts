@@ -151,6 +151,9 @@ export class ContainerAgentRuntime implements AgentRuntime {
     if (params.allowedTools) {
       state.allowedTools = [...params.allowedTools];
     }
+    if (params.policyManifestPath) {
+      state.policyManifestPath = params.policyManifestPath;
+    }
     if (this.isAlive(handle)) {
       state.pendingResume = params;
       return;

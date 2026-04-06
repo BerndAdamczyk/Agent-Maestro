@@ -83,6 +83,31 @@ export function resolvePiCommand(env: NodeJS.ProcessEnv = process.env): string {
   return "pi";
 }
 
+export function buildPiTurnArgs(params: {
+  sessionFile: string;
+  model: string;
+  prompt: string;
+  tools: string;
+  extension: string;
+  message: string;
+}): string[] {
+  return [
+    "-p",
+    "--no-extensions",
+    "--session",
+    params.sessionFile,
+    "--model",
+    params.model,
+    "--system-prompt",
+    params.prompt,
+    "--tools",
+    params.tools,
+    "--extension",
+    params.extension,
+    params.message,
+  ];
+}
+
 export function getForwardedProviderEnv(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const forwarded: Record<string, string> = {};
 

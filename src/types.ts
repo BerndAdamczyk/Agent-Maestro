@@ -243,6 +243,7 @@ export interface AgentRuntimeResumeParams {
   phase: TaskPhase;
   message: string;
   allowedTools?: string[];
+  policyManifestPath?: string;
   resumeToken?: string;
 }
 

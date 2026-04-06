@@ -1,7 +1,7 @@
 // @ts-nocheck
 
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import type { ExtensionAPI, BashToolInput, EditToolInput, ReadToolInput, WriteToolInput } from "@mariozechner/pi-coding-agent";
 import { createBashTool, createEditTool, createReadTool, createWriteTool, isToolCallEventType } from "@mariozechner/pi-coding-agent";
@@ -153,33 +153,50 @@ function maybeBlockPath(
   }
 }
 
-function assertAllowed(policy: RuntimePolicyManifest, accessKind: AccessKind, targetPath: string): void {
-  const relativePath = toRelativePath(policy.workspaceRoot, targetPath);
+export function assertAllowed(policy: RuntimePolicyManifest, accessKind: AccessKind, targetPath: string): void {
+  const { resolvedRelativePath } = resolveAuthorizedPath(policy.workspaceRoot, targetPath);
   const patterns = accessKind === "read"
     ? policy.domain.read
     : accessKind === "delete"
       ? policy.domain.delete
       : policy.domain.upsert;
 
-  const allowed = patterns.some(pattern => matchesGlob(relativePath, pattern));
+  const allowed = patterns.some(pattern => matchesGlob(resolvedRelativePath, pattern));
   if (!allowed) {
-    throw new Error(`Path "${relativePath}" is outside the allowed ${accessKind} authority`);
+    throw new Error(`Path "${resolvedRelativePath}" is outside the allowed ${accessKind} authority`);
   }
 }
 
-function validateBashCommand(policy: RuntimePolicyManifest, command: string): string | null {
+export function validateBashCommand(policy: RuntimePolicyManifest, command: string): string | null {
+  const statements = splitShellCommandSegments(command);
+
   for (const pattern of ALWAYS_BLOCK_BASH_PATTERNS) {
     if (pattern.test(command)) {
       return "Blocked high-risk bash command by runtime policy";
     }
   }
 
+  if (isShellWrapperInvocation(command)) {
+    return "Shell-wrapper bash commands are not permitted by runtime policy";
+  }
+
+  const shellSyntax = inspectShellSyntax(command);
+  if (shellSyntax.hasPipeChain) {
+    return "Pipe chains are not permitted by runtime policy";
+  }
+
+  if (shellSyntax.hasCommandSubstitution) {
+    return "Command substitution is not permitted by runtime policy";
+  }
+
   if (policy.phase === "phase_1_plan") {
-    if (!SAFE_PHASE1_BASH_RE.test(command)) {
-      return "Phase 1 planning only permits read-only bash commands";
-    }
-    if (MUTATING_BASH_RE.test(command)) {
-      return "Phase 1 planning forbids bash-based file mutations";
+    for (const statement of statements) {
+      if (!SAFE_PHASE1_BASH_RE.test(statement)) {
+        return "Phase 1 planning only permits read-only bash commands";
+      }
+      if (MUTATING_BASH_RE.test(statement)) {
+        return "Phase 1 planning forbids bash-based file mutations";
+      }
     }
     return null;
   }
@@ -188,7 +205,7 @@ function validateBashCommand(policy: RuntimePolicyManifest, command: string): st
     return "Delete operations are not permitted for this task";
   }
 
-  if (!MUTATING_BASH_RE.test(command)) {
+  if (!statements.some(statement => MUTATING_BASH_RE.test(statement))) {
     return null;
   }
 
@@ -206,6 +223,237 @@ function validateBashCommand(policy: RuntimePolicyManifest, command: string): st
   }
 
   return null;
+}
+
+const SHELL_WRAPPER_EXECUTABLES = new Set(["sh", "bash", "zsh", "dash", "python", "python3", "perl", "ruby", "node", "env"]);
+
+function isShellWrapperInvocation(command: string): boolean {
+  return splitShellCommandSegments(command).some(segment => isShellWrapperSegment(segment));
+}
+
+function isShellWrapperSegment(segment: string): boolean {
+  const tokens = tokenizeShellCommand(segment);
+  if (tokens.length === 0) return false;
+
+  let executableIndex = 0;
+  while (executableIndex < tokens.length && isEnvironmentAssignment(tokens[executableIndex]!)) {
+    executableIndex += 1;
+  }
+
+  if (executableIndex >= tokens.length) return false;
+  const executable = path.basename(tokens[executableIndex]!).toLowerCase();
+  return SHELL_WRAPPER_EXECUTABLES.has(executable);
+}
+
+function splitShellCommandSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = "";
+  let singleQuoted = false;
+  let doubleQuoted = false;
+  let escaped = false;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    const next = command[index + 1];
+
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\" && !singleQuoted) {
+      escaped = true;
+      continue;
+    }
+
+    if (char === "'" && !doubleQuoted) {
+      singleQuoted = !singleQuoted;
+      continue;
+    }
+
+    if (char === '"' && !singleQuoted) {
+      doubleQuoted = !doubleQuoted;
+      continue;
+    }
+
+    if (!singleQuoted && !doubleQuoted) {
+      if (char === ";" || char === "\n") {
+        const trimmed = current.trim();
+        if (trimmed) segments.push(trimmed);
+        current = "";
+        continue;
+      }
+
+      if (char === "&" && next === "&") {
+        const trimmed = current.trim();
+        if (trimmed) segments.push(trimmed);
+        current = "";
+        index += 1;
+        continue;
+      }
+
+      if (char === "|" && next === "|") {
+        const trimmed = current.trim();
+        if (trimmed) segments.push(trimmed);
+        current = "";
+        index += 1;
+        continue;
+      }
+    }
+
+    current += char;
+  }
+
+  const trimmed = current.trim();
+  if (trimmed) segments.push(trimmed);
+  return segments;
+}
+
+function inspectShellSyntax(command: string): { hasPipeChain: boolean; hasCommandSubstitution: boolean } {
+  let singleQuoted = false;
+  let doubleQuoted = false;
+  let escaped = false;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    const next = command[index + 1];
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\" && !singleQuoted) {
+      escaped = true;
+      continue;
+    }
+
+    if (char === "'" && !doubleQuoted) {
+      singleQuoted = !singleQuoted;
+      continue;
+    }
+
+    if (char === '"' && !singleQuoted) {
+      doubleQuoted = !doubleQuoted;
+      continue;
+    }
+
+    if (singleQuoted) continue;
+
+    if (char === "|" && !doubleQuoted) {
+      if (next === "|") {
+        index += 1;
+        continue;
+      }
+
+      return {
+        hasPipeChain: true,
+        hasCommandSubstitution: false,
+      };
+    }
+
+    if (char === "$" && next === "(") {
+      return {
+        hasPipeChain: false,
+        hasCommandSubstitution: true,
+      };
+    }
+
+    if (char === "`") {
+      return {
+        hasPipeChain: false,
+        hasCommandSubstitution: true,
+      };
+    }
+  }
+
+  return {
+    hasPipeChain: false,
+    hasCommandSubstitution: false,
+  };
+}
+
+function tokenizeShellCommand(command: string): string[] {
+  const tokens: string[] = [];
+  let current = "";
+  let singleQuoted = false;
+  let doubleQuoted = false;
+  let escaped = false;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === "\\" && !singleQuoted) {
+      escaped = true;
+      continue;
+    }
+
+    if (char === "'" && !doubleQuoted) {
+      singleQuoted = !singleQuoted;
+      continue;
+    }
+
+    if (char === '"' && !singleQuoted) {
+      doubleQuoted = !doubleQuoted;
+      continue;
+    }
+
+    if (!singleQuoted && !doubleQuoted && /\s/.test(char)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current) {
+    tokens.push(current);
+  }
+
+  return tokens;
+}
+
+function isEnvironmentAssignment(token: string): boolean {
+  return /^[A-Za-z_][A-Za-z0-9_]*=.*$/.test(token);
+}
+
+function resolveAuthorizedPath(rootDir: string, candidate: string): { resolvedRoot: string; resolvedTarget: string; resolvedRelativePath: string } {
+  const resolvedRoot = realpathSync(path.resolve(rootDir));
+  const resolvedTarget = resolveThroughRealFilesystem(path.isAbsolute(candidate) ? path.resolve(candidate) : path.resolve(rootDir, candidate));
+  const resolvedRelativePath = path.relative(resolvedRoot, resolvedTarget).replace(/\\/g, "/") || ".";
+  return {
+    resolvedRoot,
+    resolvedTarget,
+    resolvedRelativePath,
+  };
+}
+
+function resolveThroughRealFilesystem(targetPath: string): string {
+  let current = path.resolve(targetPath);
+  const missingSegments: string[] = [];
+
+  while (!existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
+
+  const resolvedBase = realpathSync(current);
+  return missingSegments.reduce((accumulator, segment) => path.join(accumulator, segment), resolvedBase);
 }
 
 function extractReferencedPaths(command: string): string[] {

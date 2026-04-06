@@ -5,8 +5,8 @@
  */
 
 import { Router } from "express";
-import { existsSync, lstatSync, readdirSync, readFileSync } from "node:fs";
-import { join, normalize, relative, sep } from "node:path";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { normalize, relative, resolve, sep } from "node:path";
 
 interface MemoryEntry {
   name: string;
@@ -23,17 +23,31 @@ export function memoryRoutes(memoryDir: string): Router {
       return null;
     }
 
-    const resolved = join(memoryDir, normalizedRelative);
-    const normalizedRoot = normalize(memoryDir + sep);
-    const normalizedResolved = normalize(resolved);
-    if (normalizedResolved !== normalize(memoryDir) && !normalizedResolved.startsWith(normalizedRoot)) {
-      return null;
-    }
-    if (pathContainsSymlink(memoryDir, normalizedResolved)) {
+    const lexicalPath = resolve(memoryDir, normalizedRelative);
+    const lexicalRelative = relative(resolve(memoryDir), lexicalPath).replace(/\\/g, "/");
+    if (lexicalRelative.startsWith("..")) {
       return null;
     }
 
-    return resolved;
+    if (!existsSync(lexicalPath)) {
+      return null;
+    }
+
+    let resolvedPath: string;
+    let resolvedRoot: string;
+    try {
+      resolvedPath = realpathSync(lexicalPath);
+      resolvedRoot = realpathSync(memoryDir);
+    } catch {
+      return null;
+    }
+
+    const resolvedRelative = relative(resolvedRoot, resolvedPath).replace(/\\/g, "/");
+    if (resolvedRelative.startsWith("..")) {
+      return null;
+    }
+
+    return resolvedPath;
   };
 
   router.get("/tree", (req, res) => {
@@ -44,7 +58,7 @@ export function memoryRoutes(memoryDir: string): Router {
       return;
     }
 
-    if (!existsSync(resolvedPath) || !lstatSync(resolvedPath).isDirectory()) {
+    if (!existsSync(resolvedPath) || !statSync(resolvedPath).isDirectory()) {
       res.status(404).json({ error: "Memory directory not found" });
       return;
     }
@@ -77,7 +91,7 @@ export function memoryRoutes(memoryDir: string): Router {
       return;
     }
 
-    if (!existsSync(resolvedPath) || !lstatSync(resolvedPath).isFile()) {
+    if (!existsSync(resolvedPath) || !statSync(resolvedPath).isFile()) {
       res.status(404).json({ error: "Memory file not found" });
       return;
     }
@@ -89,24 +103,4 @@ export function memoryRoutes(memoryDir: string): Router {
   });
 
   return router;
-}
-
-function pathContainsSymlink(rootDir: string, targetPath: string): boolean {
-  const relativePath = relative(rootDir, targetPath);
-  if (!relativePath || relativePath === "") {
-    return false;
-  }
-
-  let currentPath = rootDir;
-  for (const segment of relativePath.split(sep).filter(Boolean)) {
-    currentPath = join(currentPath, segment);
-    if (!existsSync(currentPath)) {
-      return false;
-    }
-    if (lstatSync(currentPath).isSymbolicLink()) {
-      return true;
-    }
-  }
-
-  return false;
 }

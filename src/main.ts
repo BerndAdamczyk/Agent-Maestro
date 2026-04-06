@@ -27,6 +27,7 @@ import { TaskPlanService } from "./task-plan.js";
 import { TaskPlanProvider } from "./task-plan-provider.js";
 import { buildNonTerminalResumeMessage, classifyInactiveRuntime } from "./runtime/inactive-runtime.js";
 import { createAgentRuntime, hasExistingSessionState } from "./startup.js";
+import { teardownPersistedRuntime } from "./runtime/recovery.js";
 import { createWebServer } from "../web/server/index.js";
 import { formatTimestamp } from "./utils.js";
 import type {
@@ -524,6 +525,7 @@ function consumeRuntimeControlSignals(
         phase: "phase_2_execute",
         message: "The proposed approach is approved. Proceed to implementation and complete the task.",
         allowedTools: runtimeContext.allowedTools,
+        policyManifestPath: runtimeContext.policyManifestPath,
       });
       taskManager.updateStatus(taskId, "in_progress");
       logger.logEntry("Monitor", `Consumed plan_approved for ${taskId}; resumed ${worker.agentName} in phase_2_execute`, {
@@ -545,6 +547,7 @@ function consumeRuntimeControlSignals(
           "Do not implement yet. Update the Proposed Approach section and set status to plan_ready again.",
         ].join("\n"),
         allowedTools: runtimeContext.allowedTools,
+        policyManifestPath: runtimeContext.policyManifestPath,
       });
       taskManager.updateStatus(taskId, "in_progress");
       logger.logEntry("Monitor", `Consumed plan_revision_needed for ${taskId}; resumed ${worker.agentName} in phase_1_plan`, {
@@ -726,6 +729,7 @@ function recoverPersistedWorkers(
     if (!task) continue;
     if (task.status === "complete" || task.status === "failed") continue;
 
+    const teardown = teardownPersistedRuntime(persisted);
     runtime.destroy({
       id: persisted.runtimeId,
       runtimeType: persisted.runtimeType,
@@ -742,12 +746,21 @@ function recoverPersistedWorkers(
         correlationId: persisted.correlationId,
       },
     );
+    if (!memory.sessionDAG.sessionExists(persisted.taskId)) {
+      memory.sessionDAG.createSession(persisted.taskId);
+    }
+    if (teardown.attempted) {
+      memory.sessionDAG.append(persisted.taskId, {
+        role: "system",
+        content: `Resume teardown attempted ${teardown.commands.join("; ") || "runtime-specific cleanup"} for persisted ${persisted.runtimeType} runtime ${persisted.runtimeId}.`,
+      });
+    }
     taskManager.setRevisionFeedback(
       persisted.taskId,
       [
         `Resume detected a previously active ${persisted.runtimeType} worker (${persisted.runtimeId}) for ${persisted.agentName}.`,
-        "Automatic runtime-handle reconstruction is not available yet, so the task was failed to prevent duplicate relaunch.",
-        "Review the task file, logs, and runtime session artifacts before re-queueing the work.",
+        "Best-effort runtime teardown was attempted before the task was failed to prevent duplicate relaunch.",
+        "Automatic runtime-handle reconstruction is not available yet, so review the task file, logs, and runtime session artifacts before re-queueing the work.",
       ].join(" "),
     );
     taskManager.updateStatus(persisted.taskId, "failed");
