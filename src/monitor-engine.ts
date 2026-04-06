@@ -75,8 +75,10 @@ export class MonitorEngine {
     }
 
     // 3. Task status file check
+    let taskStatus: TaskStatus | null = null;
     const task = this.taskManager.readTask(worker.taskId);
     if (task) {
+      taskStatus = task.status;
       result.taskStatus = task.status;
 
       if (task.status === "plan_ready" || task.status === "plan_approved" || task.status === "plan_revision_needed") {
@@ -88,7 +90,7 @@ export class MonitorEngine {
     const secondsSinceOutput = (Date.now() - worker.lastOutputAt.getTime()) / 1000;
     result.isStalled = secondsSinceOutput > this.stallTimeout;
 
-    if (result.isStalled) {
+    if (result.isStalled && taskStatus !== "stalled") {
       this.logger.logEntry(
         "Monitor",
         `Agent ${worker.agentName} (${worker.taskId}) stalled: no output for ${Math.round(secondsSinceOutput)}s`,

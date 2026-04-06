@@ -39,6 +39,7 @@ export function createWebServer(deps: WebServerDeps) {
 
   const app = express();
   app.use(express.json());
+  const tmuxService = new TmuxService(config.tmux_session);
 
   // Static files for web client
   const clientDir = join(rootDir, "web", "client");
@@ -55,18 +56,24 @@ export function createWebServer(deps: WebServerDeps) {
   app.use("/api/session", sessionRoutes(getSession));
   app.use("/api/skills", skillRoutes(skillsDir));
   app.use("/api/actions", actionRoutes(taskManager, logger));
-  app.use("/api/tmux", tmuxRoutes(new TmuxService(config.tmux_session)));
+  app.use("/api/tmux", tmuxRoutes(tmuxService));
 
   // Health check
   app.get("/api/health", (_req, res) => {
-    res.json({ status: "ok", uptime: process.uptime() });
+    const panes = tmuxService.listPanes();
+    res.json({
+      status: "ok",
+      uptime: process.uptime(),
+      tmuxSessionExists: tmuxService.sessionExists(),
+      paneCount: panes.length,
+      unhealthyPaneCount: panes.filter(pane => !pane.healthy).length,
+    });
   });
 
   // HTTP server
   const server = createServer(app);
 
   // WebSocket
-  const tmuxService = new TmuxService(config.tmux_session);
   const wsHandler = new WebSocketHandler(server, tmuxService);
 
   // File watcher

@@ -177,8 +177,8 @@ function classifyLogEntry(e) {
     const task = S.tasks.find(t => t.id === taskId);
     return { type: 'delegation', agent: e.agent, ts: e.timestamp, message: m, taskId, target, task };
   }
-  if (/status.*(pending|in_progress|complete|failed|plan_ready|plan_approved)/i.test(m)) {
-    const match = m.match(/(pending|in_progress|complete|failed|plan_ready|plan_approved|plan_revision_needed)/i);
+  if (/status.*(pending|in_progress|complete|failed|stalled|plan_ready|plan_approved)/i.test(m)) {
+    const match = m.match(/(pending|in_progress|complete|failed|stalled|plan_ready|plan_approved|plan_revision_needed)/i);
     return { type: 'status_change', agent: e.agent, ts: e.timestamp, message: m, status: match ? match[1] : '' };
   }
   if (/reconcil/i.test(m)) {
@@ -294,7 +294,7 @@ function renderDashboard() {
     </div>
     <div class="card" style="grid-column: 1/-1;"><h3>Recent Log</h3>
       <div class="log-list">${S.logEntries.slice(-30).reverse().map(e =>
-        `<div class="log-item"><span class="lt">${fmtTime(e.timestamp)}</span><span class="la">${esc(e.agent)}</span><span>${esc(e.message)}</span></div>`
+        `<div class="log-item"><span class="lt">${fmtTime(e.timestamp)}</span><span class="ll">${esc(e.level || 'info')}</span><span class="la">${esc(e.agent)}</span><span>${esc(e.message)}</span></div>`
       ).join('')}</div>
     </div>`;
 }

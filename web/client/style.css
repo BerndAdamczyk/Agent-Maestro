@@ -4,7 +4,7 @@
   --text: #e6edf3; --text2: #8b949e; --text3: #484f58;
   --maestro: #FF6B6B; --planning: #4ECDC4; --engineering: #FFEAA7; --validation: #F7DC6F;
   --pending: #8b949e; --in_progress: #58a6ff; --plan_ready: #d29922;
-  --plan_approved: #3fb8af; --complete: #3fb950; --failed: #f85149;
+  --plan_approved: #3fb8af; --complete: #3fb950; --failed: #f85149; --stalled: #ffb86c;
   --plan_revision_needed: #db6d28;
   --radius: 8px; --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
@@ -60,6 +60,7 @@ main { flex: 1; overflow: hidden; position: relative; }
 .status-plan_ready { background: var(--plan_ready); color: #000; }
 .status-plan_approved { background: var(--plan_approved); color: #000; }
 .status-plan_revision_needed { background: var(--plan_revision_needed); color: #000; }
+.status-stalled { background: var(--stalled); color: #000; }
 .status-complete { background: var(--complete); color: #000; }
 .status-failed { background: var(--failed); color: #fff; }
 
@@ -83,6 +84,7 @@ main { flex: 1; overflow: hidden; position: relative; }
 .log-item { padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 12px; display: flex; gap: 8px; }
 .log-item .la { color: var(--planning); font-weight: 600; min-width: 80px; }
 .log-item .lt { color: var(--text3); font-family: var(--mono); font-size: 11px; min-width: 60px; }
+.log-item .ll { font-family: var(--mono); font-size: 11px; min-width: 44px; text-transform: uppercase; color: var(--text3); }
 
 /* Tasks table */
 .task-table { width: 100%; border-collapse: collapse; }

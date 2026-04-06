@@ -178,19 +178,58 @@ async function main() {
     const results = monitorEngine.monitorAll(workers);
 
     for (const result of results) {
+      const task = taskManager.readTask(result.taskId);
+      const worker = delegationEngine.getActiveWorker(result.taskId);
+
+      if (task && worker && result.hasNewOutput && task.status === "stalled") {
+        taskManager.updateStatus(result.taskId, "in_progress");
+        logger.logEntry("Monitor", `Activity resumed for ${result.taskId}; clearing stalled state`, {
+          taskId: result.taskId,
+          correlationId: task.correlationId,
+        });
+      }
+
+      if (task && worker && task.status !== "complete" && task.status !== "failed") {
+        const elapsedSeconds = (Date.now() - worker.startedAt.getTime()) / 1000;
+        if (elapsedSeconds > task.timeBudget) {
+          runtime.interrupt(worker.runtimeHandle, `Task timeout exceeded (${task.timeBudget}s)`);
+          taskManager.updateStatus(result.taskId, "failed");
+          logger.logEntry("Monitor", `Task timeout for ${result.taskId} after ${Math.round(elapsedSeconds)}s`, {
+            level: "error",
+            taskId: result.taskId,
+            correlationId: task.correlationId,
+          });
+          delegationEngine.completeWorker(result.taskId);
+          monitorEngine.clearCache(result.taskId);
+          continue;
+        }
+      }
+
+      if (task && worker && result.isStalled && task.status === "in_progress") {
+        taskManager.updateStatus(result.taskId, "stalled");
+        runtime.resume(worker.runtimeHandle, {
+          phase: task.phase,
+          message: `No new output was detected for ${config.limits.stall_timeout_seconds}s. Provide a progress update or continue the task immediately.`,
+        });
+        logger.logEntry("Monitor", `Sent stall nudge to ${result.taskId}`, {
+          level: "warn",
+          taskId: result.taskId,
+          correlationId: task.correlationId,
+        });
+      }
+
       if (result.taskStatus === "complete") {
         const validation = taskManager.validateHandoff(result.taskId);
 
         if (validation.status === "invalid") {
           taskManager.updateStatus(result.taskId, "in_progress");
-          const worker = delegationEngine.getActiveWorker(result.taskId);
           logger.logEntry(
             "Validation",
             `Rejected handoff for ${result.taskId}: ${validation.issues.join("; ")}`,
             {
               level: "warn",
               taskId: result.taskId,
-              correlationId: worker?.correlationId ?? taskManager.readTask(result.taskId)?.correlationId ?? null,
+              correlationId: worker?.correlationId ?? task?.correlationId ?? null,
             }
           );
 
@@ -230,7 +269,6 @@ async function main() {
         result.taskStatus !== "plan_approved" &&
         result.taskStatus !== "plan_revision_needed"
       ) {
-        const task = taskManager.readTask(result.taskId);
         logger.logEntry("Monitor", `Agent crashed: ${result.agentName} (${result.taskId})`, {
           level: "error",
           taskId: result.taskId,
@@ -239,6 +277,29 @@ async function main() {
         taskManager.updateStatus(result.taskId, "failed");
         delegationEngine.completeWorker(result.taskId);
       }
+    }
+
+    const escalationCandidates = monitorEngine.getEscalationCandidates(
+      workers,
+      config.limits.escalate_after_seconds,
+    );
+
+    for (const worker of escalationCandidates) {
+      const task = taskManager.readTask(worker.taskId);
+      if (!task || task.status !== "stalled") continue;
+
+      runtime.interrupt(
+        worker.runtimeHandle,
+        `Escalation timeout exceeded (${config.limits.escalate_after_seconds}s without output)`,
+      );
+      taskManager.updateStatus(worker.taskId, "failed");
+      logger.logEntry("Monitor", `Escalated stalled task ${worker.taskId} to failure`, {
+        level: "error",
+        taskId: worker.taskId,
+        correlationId: task.correlationId,
+      });
+      delegationEngine.completeWorker(worker.taskId);
+      monitorEngine.clearCache(worker.taskId);
     }
 
     // Refresh status table
