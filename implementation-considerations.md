@@ -17,6 +17,7 @@ Last updated: 2026-04-06
 | P2 no-tmux degradation | Implemented | `PlainProcessAgentRuntime` now provides a `child_process.spawn` fallback with output capture and redacted per-agent log persistence when tmux is unavailable. | Runtime |
 | P2 Express baseline / wave cycle detection | Implemented | Express is pinned to the 4.21.x line per the architecture doc; `computeWaves()` already enforced cycle detection and remains unchanged. | Platform |
 | P2 stall / timeout ladder | Implemented | Stalled workers now transition to `stalled`, receive a runtime nudge, recover back to `in_progress` on new output, and escalate to interruption/failure when the configured timeout ladder is exceeded. | Runtime / Monitoring |
+| Memory promotion / daily protocol flush | Implemented | Task lifecycle events now append to the Session DAG and promote validated task outcomes into Level 2 daily protocols on completion/failure before Git memory checkpoints are attempted. | Memory / Runtime |
 
 ## Follow-up notes
 

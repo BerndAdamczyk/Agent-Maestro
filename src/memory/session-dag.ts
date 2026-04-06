@@ -32,9 +32,13 @@ export class SessionDAGManager {
     }
   }
 
-  append(taskId: string, entry: Omit<SessionDAGEntry, "id" | "ts">): SessionDAGEntry {
+  append(
+    taskId: string,
+    entry: Omit<SessionDAGEntry, "id" | "ts" | "parentId"> & { parentId?: string | null },
+  ): SessionDAGEntry {
     const full: SessionDAGEntry = {
       ...entry,
+      parentId: entry.parentId ?? this.getLeaf(taskId),
       id: uuid(),
       ts: new Date().toISOString(),
     };

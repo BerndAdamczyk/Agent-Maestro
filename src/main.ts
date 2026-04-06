@@ -25,7 +25,13 @@ import { DelegationEngine } from "./delegation-engine.js";
 import { MonitorEngine } from "./monitor-engine.js";
 import { ReconcileEngine } from "./reconcile-engine.js";
 import { createWebServer } from "../web/server/index.js";
-import type { SystemConfig, SessionState, ActiveWorker } from "./types.js";
+import type {
+  SystemConfig,
+  SessionState,
+  ActiveWorker,
+  ParsedTask,
+  DailyProtocolEntry,
+} from "./types.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { TmuxAgentRuntime } from "./runtime/tmux-agent-runtime.js";
 import { DryRunAgentRuntime } from "./runtime/dry-run-runtime.js";
@@ -174,7 +180,7 @@ async function main() {
     const workers = delegationEngine.getActiveWorkers();
     if (workers.size === 0) return;
 
-    consumeRuntimeControlSignals(workers, taskManager, runtime, logger);
+    consumeRuntimeControlSignals(workers, taskManager, runtime, logger, memory);
     const results = monitorEngine.monitorAll(workers);
 
     for (const result of results) {
@@ -183,6 +189,7 @@ async function main() {
 
       if (task && worker && result.hasNewOutput && task.status === "stalled") {
         taskManager.updateStatus(result.taskId, "in_progress");
+        appendSessionEvent(memory, result.taskId, "Activity resumed after stalled state.");
         logger.logEntry("Monitor", `Activity resumed for ${result.taskId}; clearing stalled state`, {
           taskId: result.taskId,
           correlationId: task.correlationId,
@@ -194,11 +201,14 @@ async function main() {
         if (elapsedSeconds > task.timeBudget) {
           runtime.interrupt(worker.runtimeHandle, `Task timeout exceeded (${task.timeBudget}s)`);
           taskManager.updateStatus(result.taskId, "failed");
+          appendSessionEvent(memory, result.taskId, `Task timed out after ${Math.round(elapsedSeconds)}s.`);
+          promoteTaskMemory(memory, task, worker.agentName, "failed");
           logger.logEntry("Monitor", `Task timeout for ${result.taskId} after ${Math.round(elapsedSeconds)}s`, {
             level: "error",
             taskId: result.taskId,
             correlationId: task.correlationId,
           });
+          checkpointMemory(memory, `${result.taskId} failed`);
           delegationEngine.completeWorker(result.taskId);
           monitorEngine.clearCache(result.taskId);
           continue;
@@ -207,6 +217,7 @@ async function main() {
 
       if (task && worker && result.isStalled && task.status === "in_progress") {
         taskManager.updateStatus(result.taskId, "stalled");
+        appendSessionEvent(memory, result.taskId, "No new output detected; worker moved to stalled and received a nudge.");
         runtime.resume(worker.runtimeHandle, {
           phase: task.phase,
           message: `No new output was detected for ${config.limits.stall_timeout_seconds}s. Provide a progress update or continue the task immediately.`,
@@ -223,6 +234,7 @@ async function main() {
 
         if (validation.status === "invalid") {
           taskManager.updateStatus(result.taskId, "in_progress");
+          appendSessionEvent(memory, result.taskId, `Handoff validation failed: ${validation.issues.join("; ")}`);
           logger.logEntry(
             "Validation",
             `Rejected handoff for ${result.taskId}: ${validation.issues.join("; ")}`,
@@ -249,15 +261,15 @@ async function main() {
 
       // Handle completed workers
       if (result.taskStatus === "complete" || result.taskStatus === "failed") {
+        if (task && worker) {
+          appendSessionEvent(memory, result.taskId, `Task reached terminal status: ${result.taskStatus}.`);
+          promoteTaskMemory(memory, task, worker.agentName, result.taskStatus);
+        }
         delegationEngine.completeWorker(result.taskId);
         monitorEngine.clearCache(result.taskId);
 
         // Git checkpoint on completion
-        try {
-          memory.gitCheckpoint.checkpoint(`${result.taskId} ${result.taskStatus}`);
-        } catch {
-          // Git might not be initialized -- non-fatal
-        }
+        checkpointMemory(memory, `${result.taskId} ${result.taskStatus}`);
       }
 
       // Handle dead runtimes
@@ -274,7 +286,12 @@ async function main() {
           taskId: result.taskId,
           correlationId: task?.correlationId ?? null,
         });
+        if (task && worker) {
+          appendSessionEvent(memory, result.taskId, "Runtime disappeared unexpectedly; task marked failed.");
+          promoteTaskMemory(memory, task, worker.agentName, "failed");
+        }
         taskManager.updateStatus(result.taskId, "failed");
+        checkpointMemory(memory, `${result.taskId} failed`);
         delegationEngine.completeWorker(result.taskId);
       }
     }
@@ -293,11 +310,14 @@ async function main() {
         `Escalation timeout exceeded (${config.limits.escalate_after_seconds}s without output)`,
       );
       taskManager.updateStatus(worker.taskId, "failed");
+      appendSessionEvent(memory, worker.taskId, "Stall escalation threshold exceeded; task marked failed.");
+      promoteTaskMemory(memory, task, worker.agentName, "failed");
       logger.logEntry("Monitor", `Escalated stalled task ${worker.taskId} to failure`, {
         level: "error",
         taskId: worker.taskId,
         correlationId: task.correlationId,
       });
+      checkpointMemory(memory, `${worker.taskId} failed`);
       delegationEngine.completeWorker(worker.taskId);
       monitorEngine.clearCache(worker.taskId);
     }
@@ -382,12 +402,14 @@ function consumeRuntimeControlSignals(
   taskManager: TaskManager,
   runtime: AgentRuntime,
   logger: Logger,
+  memory: MemorySubsystem,
 ): void {
   for (const [taskId, worker] of workers) {
     const task = taskManager.readTask(taskId);
     if (!task) continue;
 
     if (task.status === "plan_approved") {
+      appendSessionEvent(memory, taskId, "Plan approved by lead; resuming execution phase.");
       runtime.resume(worker.runtimeHandle, {
         phase: "phase_2_execute",
         message: "The proposed approach is approved. Proceed to implementation and complete the task.",
@@ -401,6 +423,7 @@ function consumeRuntimeControlSignals(
     }
 
     if (task.status === "plan_revision_needed") {
+      appendSessionEvent(memory, taskId, `Plan revision requested: ${task.revisionFeedback ?? "No explicit feedback provided."}`);
       runtime.resume(worker.runtimeHandle, {
         phase: "phase_1_plan",
         message: [
@@ -417,4 +440,100 @@ function consumeRuntimeControlSignals(
       });
     }
   }
+}
+
+function appendSessionEvent(memory: MemorySubsystem, taskId: string, content: string): void {
+  memory.sessionDAG.append(taskId, {
+    role: "system",
+    content,
+  });
+}
+
+function promoteTaskMemory(
+  memory: MemorySubsystem,
+  task: ParsedTask,
+  agentName: string,
+  outcome: "complete" | "failed",
+): void {
+  const entries = buildDailyProtocolEntries(task, agentName, outcome);
+  if (entries.length === 0) return;
+  memory.dailyProtocol.flush(entries);
+}
+
+function buildDailyProtocolEntries(
+  task: ParsedTask,
+  agentName: string,
+  outcome: "complete" | "failed",
+): DailyProtocolEntry[] {
+  const time = new Date().toISOString().slice(11, 16);
+  const entries: DailyProtocolEntry[] = [];
+
+  if (outcome === "failed") {
+    entries.push({
+      time,
+      agent: agentName,
+      confidence: 0.9,
+      content: `Task ${task.id} failed while "${task.title}". Review workspace/task state and runtime logs for recovery context.`,
+      sourceTask: task.id,
+      category: "error_pattern",
+    });
+  }
+
+  if (!task.handoffReport) {
+    return entries;
+  }
+
+  entries.push({
+    time,
+    agent: agentName,
+    confidence: 0.85,
+    content: `${task.id} completed: ${task.handoffReport.changesMade}`,
+    sourceTask: task.id,
+    category: "finding",
+  });
+
+  entries.push({
+    time,
+    agent: agentName,
+    confidence: 0.8,
+    content: `${task.id} patterns followed: ${task.handoffReport.patternsFollowed}`,
+    sourceTask: task.id,
+    category: "decision",
+  });
+
+  if (!isExplicitNone(task.handoffReport.unresolvedConcerns)) {
+    entries.push({
+      time,
+      agent: agentName,
+      confidence: 0.75,
+      content: `${task.id} unresolved concerns: ${task.handoffReport.unresolvedConcerns}`,
+      sourceTask: task.id,
+      category: "error_pattern",
+    });
+  }
+
+  if (!isExplicitNone(task.handoffReport.suggestedFollowups)) {
+    entries.push({
+      time,
+      agent: agentName,
+      confidence: 0.75,
+      content: `${task.id} follow-ups: ${task.handoffReport.suggestedFollowups}`,
+      sourceTask: task.id,
+      category: "decision",
+    });
+  }
+
+  return entries;
+}
+
+function checkpointMemory(memory: MemorySubsystem, message: string): void {
+  try {
+    memory.gitCheckpoint.checkpoint(message);
+  } catch {
+    // Git might not be initialized -- non-fatal
+  }
+}
+
+function isExplicitNone(value: string): boolean {
+  return /^(?:none|none noted|no follow-?ups|no unresolved concerns|n\/a)$/i.test(value.trim());
 }

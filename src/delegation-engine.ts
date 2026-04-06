@@ -108,6 +108,12 @@ export class DelegationEngine {
 
     // Initialize session DAG (Level 1 memory)
     this.memory.sessionDAG.createSession(task.id);
+    this.memory.sessionDAG.append(task.id, {
+      role: "system",
+      tool: "delegate",
+      content: `Delegated ${task.id} to ${params.agentName} for wave ${params.wave}. Correlation ID: ${task.correlationId}`,
+      parentId: null,
+    });
 
     // Ensure agent memory directories exist
     this.memory.expertise.ensureAgentMemory(params.agentName);
@@ -130,6 +136,10 @@ export class DelegationEngine {
         MAESTRO_TASK_ID: task.id,
         MAESTRO_AGENT_NAME: params.agentName,
       },
+    });
+    this.memory.sessionDAG.append(task.id, {
+      role: "assistant",
+      content: `Runtime launched via ${runtimeHandle.runtimeType} with handle ${runtimeHandle.id}.`,
     });
 
     // Track active worker
