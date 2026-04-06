@@ -62,6 +62,11 @@ export class DelegationEngine {
    * Creates task file, assembles prompt, spawns agent process.
    */
   async delegate(params: DelegationParams): Promise<ActiveWorker> {
+    const existingWorker = this.activeWorkers.get(params.taskId);
+    if (existingWorker) {
+      return existingWorker;
+    }
+
     // Depth guard
     if (params.delegationDepth > this.config.limits.max_delegation_depth) {
       throw new Error(
@@ -78,22 +83,13 @@ export class DelegationEngine {
     // Check agent has delegate capability (if needed)
     // Workers don't need delegate, they're being delegated TO
 
-    // Spawn budget check
-    if (!this.runtime.hasCapacity()) {
-      this.logger.logEntry("Maestro", `Queuing delegation for '${params.agentName}' -- spawn budget full`, {
-        level: "warn",
-        taskId: params.taskId || null,
-        correlationId: null,
-      });
-      this.delegationQueue.push({ params, queuedAt: new Date() });
-      throw new Error("Spawn budget exhausted, delegation queued");
-    }
-
-    // Create task file
-    const task = this.taskManager.createTask({
+    const task = this.taskManager.readTask(params.taskId) ?? this.taskManager.createTask({
+      taskId: params.taskId,
       title: params.taskTitle,
       description: params.taskDescription,
       assignedTo: params.agentName,
+      taskType: params.taskType,
+      acceptanceCriteria: params.acceptanceCriteria,
       wave: params.wave,
       dependencies: params.dependencies,
       parentTask: params.parentTaskId,
@@ -101,9 +97,15 @@ export class DelegationEngine {
       timeBudget: params.timeBudget,
     });
 
-    // Override task ID if pre-assigned
-    if (params.taskId && params.taskId !== task.id) {
-      // Use the pre-assigned ID (for fix-tasks etc.)
+    // Spawn budget check
+    if (!this.runtime.hasCapacity()) {
+      this.logger.logEntry("Maestro", `Queuing delegation for '${params.agentName}' -- spawn budget full`, {
+        level: "warn",
+        taskId: task.id,
+        correlationId: task.correlationId,
+      });
+      this.delegationQueue.push({ params, queuedAt: new Date() });
+      throw new Error("Spawn budget exhausted, delegation queued");
     }
 
     // Initialize session DAG (Level 1 memory)

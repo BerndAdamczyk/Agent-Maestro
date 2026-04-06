@@ -47,16 +47,20 @@ export class TaskManager {
   }
 
   createTask(params: {
+    taskId?: string;
     title: string;
     description: string;
     assignedTo: string;
+    taskType?: string;
+    acceptanceCriteria?: string[];
     wave: number;
     dependencies?: string[];
     parentTask?: string | null;
     planFirst?: boolean;
     timeBudget?: number;
   }): ParsedTask {
-    const id = `task-${String(this.nextId++).padStart(3, "0")}`;
+    const id = params.taskId ?? `task-${String(this.nextId++).padStart(3, "0")}`;
+    this.bumpNextId(id);
     const now = new Date().toISOString();
 
     const task: ParsedTask = {
@@ -65,6 +69,8 @@ export class TaskManager {
       title: params.title,
       description: params.description,
       assignedTo: params.assignedTo,
+      taskType: params.taskType ?? "general",
+      acceptanceCriteria: params.acceptanceCriteria ?? [],
       status: "pending",
       phase: params.planFirst ? "phase_1_plan" : "none",
       wave: params.wave,
@@ -82,6 +88,55 @@ export class TaskManager {
 
     this.writeTask(task);
     return task;
+  }
+
+  upsertTaskDefinition(params: {
+    taskId: string;
+    title: string;
+    description: string;
+    assignedTo: string;
+    taskType?: string;
+    acceptanceCriteria?: string[];
+    wave: number;
+    dependencies?: string[];
+    parentTask?: string | null;
+    planFirst?: boolean;
+    timeBudget?: number;
+  }): ParsedTask {
+    const existing = this.readTask(params.taskId);
+    if (!existing) {
+      return this.createTask(params);
+    }
+
+    existing.title = params.title;
+    existing.description = params.description;
+    existing.assignedTo = params.assignedTo;
+    existing.taskType = params.taskType ?? existing.taskType;
+    existing.acceptanceCriteria = params.acceptanceCriteria ?? existing.acceptanceCriteria;
+    existing.wave = params.wave;
+    existing.dependencies = params.dependencies ?? [];
+    existing.parentTask = params.parentTask ?? null;
+    existing.planFirst = params.planFirst ?? false;
+    existing.timeBudget = params.timeBudget ?? existing.timeBudget;
+
+    if (existing.planFirst && existing.phase === "none" && existing.status === "pending") {
+      existing.phase = "phase_1_plan";
+    }
+
+    if (!existing.planFirst && existing.phase === "phase_1_plan") {
+      existing.phase = "none";
+    }
+
+    existing.updatedAt = new Date().toISOString();
+    this.writeTask(existing);
+    return existing;
+  }
+
+  private bumpNextId(taskId: string): void {
+    const match = taskId.match(/^task-(\d+)$/);
+    if (!match) return;
+    const numericId = parseInt(match[1]!, 10);
+    this.nextId = Math.max(this.nextId, numericId + 1);
   }
 
   readTask(taskId: string): ParsedTask | null {
@@ -175,6 +230,7 @@ export class TaskManager {
       `**Status:** ${task.status}`,
       `**Correlation ID:** ${task.correlationId}`,
       `**Assigned To:** ${task.assignedTo}`,
+      `**Task Type:** ${task.taskType}`,
       `**Wave:** ${task.wave}`,
       `**Phase:** ${task.phase}`,
       `**Plan First:** ${task.planFirst}`,
@@ -189,6 +245,14 @@ export class TaskManager {
       task.description,
       "",
     ];
+
+    if (task.acceptanceCriteria.length > 0) {
+      lines.push("## Acceptance Criteria", "");
+      for (const criterion of task.acceptanceCriteria) {
+        lines.push(`- ${criterion}`);
+      }
+      lines.push("");
+    }
 
     if (task.proposedApproach) {
       lines.push("## Proposed Approach", "", task.proposedApproach, "");
@@ -257,6 +321,13 @@ export class TaskManager {
       return match?.[1]?.trim() ?? "";
     };
 
+    const getListSection = (heading: string): string[] => {
+      return getSection(heading)
+        .split("\n")
+        .map(line => line.replace(/^- /, "").trim())
+        .filter(Boolean);
+    };
+
     const titleMatch = content.match(/^# .+?:\s*(.+)$/m);
     const deps = get("Dependencies");
 
@@ -291,6 +362,8 @@ export class TaskManager {
       title: titleMatch?.[1] ?? "",
       description: getSection("Description"),
       assignedTo: get("Assigned To"),
+      taskType: get("Task Type") || "general",
+      acceptanceCriteria: getListSection("Acceptance Criteria"),
       status: (get("Status") || "pending") as TaskStatus,
       phase: (get("Phase") || "none") as TaskPhase,
       wave: parseInt(get("Wave") || "0", 10),

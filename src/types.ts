@@ -35,7 +35,7 @@ export const DomainRestrictionsSchema = z.object({
 export const ModelTierSchema = z.enum(["curator", "lead", "worker"]);
 
 export const AgentFrontmatterSchema = z.object({
-  schema_version: z.number().int().default(SCHEMA_VERSION),
+  schema_version: z.coerce.number().default(SCHEMA_VERSION),
   name: z.string().min(1),
   model: z.string().min(1),
   model_tier: ModelTierSchema,
@@ -112,7 +112,7 @@ export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
 // ── System Config (multi-team-config.yaml) ───────────────────────────
 
 export const SystemConfigSchema = z.object({
-  schema_version: z.number().int().default(SCHEMA_VERSION),
+  schema_version: z.coerce.number().default(SCHEMA_VERSION),
   project_name: z.string().default("agent-maestro"),
   paths: z.object({
     workspace: z.string().default("workspace"),
@@ -140,6 +140,44 @@ export const SystemConfigSchema = z.object({
 });
 
 export type SystemConfig = z.infer<typeof SystemConfigSchema>;
+
+// ── Task Plan Types ──────────────────────────────────────────────────
+
+export const TaskPlanTaskSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().min(1),
+  assigned_to: z.string().min(1),
+  task_type: z.string().default("general"),
+  dependencies: z.array(z.string()).default([]),
+  parent_task: z.string().nullable().default(null),
+  plan_first: z.boolean().default(false),
+  time_budget: z.number().int().positive().default(600),
+  acceptance_criteria: z.array(z.string()).default([]),
+});
+
+export const TaskPlanSchema = z.object({
+  schema_version: z.coerce.number().default(SCHEMA_VERSION),
+  goal: z.string().min(1),
+  tasks: z.array(TaskPlanTaskSchema).min(1),
+  validation_commands: z.array(z.string().min(1)).default([]),
+});
+
+export type TaskPlanTask = z.infer<typeof TaskPlanTaskSchema>;
+export type TaskPlan = z.infer<typeof TaskPlanSchema>;
+
+export interface ResolvedTaskPlanTask extends TaskPlanTask {
+  wave: number;
+  originalOrder: number;
+}
+
+export interface ResolvedTaskPlan {
+  source: "workspace" | "llm";
+  sourcePath: string;
+  goal: string;
+  tasks: ResolvedTaskPlanTask[];
+  validation_commands: string[];
+}
 
 // ── Runtime Types ────────────────────────────────────────────────────
 
@@ -236,6 +274,8 @@ export interface ParsedTask {
   title: string;
   description: string;
   assignedTo: string;
+  taskType: string;
+  acceptanceCriteria: string[];
   status: TaskStatus;
   phase: TaskPhase;
   wave: number;
@@ -360,6 +400,9 @@ export interface DelegationParams {
   taskId: string;
   taskTitle: string;
   taskDescription: string;
+  taskType: string;
+  acceptanceCriteria: string[];
+  phase: TaskPhase;
   wave: number;
   dependencies: string[];
   planFirst: boolean;

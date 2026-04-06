@@ -24,6 +24,9 @@ import { StatusManager } from "./status-manager.js";
 import { DelegationEngine } from "./delegation-engine.js";
 import { MonitorEngine } from "./monitor-engine.js";
 import { ReconcileEngine } from "./reconcile-engine.js";
+import { OrchestrationEngine } from "./orchestration-engine.js";
+import { TaskPlanService } from "./task-plan.js";
+import { TaskPlanProvider } from "./task-plan-provider.js";
 import { createWebServer } from "../web/server/index.js";
 import type {
   SystemConfig,
@@ -92,6 +95,7 @@ async function main() {
 
   const promptAssembler = new PromptAssembler(rootDir, config, memory);
   const runtime = createAgentRuntime(runtimeMode, config);
+  runtime.ensureReady();
 
   const delegationEngine = new DelegationEngine(
     rootDir, config, agentResolver, promptAssembler, runtime,
@@ -103,6 +107,8 @@ async function main() {
   );
 
   const reconcileEngine = new ReconcileEngine(rootDir, config, taskManager, logger);
+  const taskPlanService = new TaskPlanService(rootDir, config, agentResolver);
+  const taskPlanProvider = new TaskPlanProvider(rootDir, config, agentResolver, logger);
 
   // Session state
   const session: SessionState = {
@@ -152,10 +158,6 @@ async function main() {
 
   // ── Orchestration Loop ───────────────────────────────────────────
 
-  console.log("\nMaestro is running. The orchestration loop is ready.");
-  console.log("In production, this would connect to an LLM to decompose the goal.");
-  console.log("For now, agents can be delegated via the Web UI or programmatically.\n");
-
   // Write a shared context README if missing
   const sharedContextDir = join(rootDir, config.paths.shared_context);
   mkdirSync(sharedContextDir, { recursive: true });
@@ -175,8 +177,26 @@ async function main() {
     ].join("\n"), "utf-8");
   }
 
+  const orchestrationEngine = new OrchestrationEngine({
+    rootDir,
+    config,
+    session,
+    agentResolver,
+    taskPlanService,
+    taskPlanProvider,
+    taskManager,
+    delegationEngine,
+    monitorEngine,
+    reconcileEngine,
+    statusManager,
+    logger,
+    memory,
+    runtime,
+  });
+
   // Monitoring loop
-  const monitorInterval = setInterval(() => {
+  let monitorInterval: NodeJS.Timeout;
+  monitorInterval = setInterval(() => {
     const workers = delegationEngine.getActiveWorkers();
     if (workers.size === 0) return;
 
@@ -335,10 +355,15 @@ async function main() {
   }, 5000);
 
   // Graceful shutdown
-  const shutdown = async () => {
+  let shuttingDown = false;
+  const shutdown = async (exitCode: number = 0) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     console.log("\nShutting down...");
     clearInterval(monitorInterval);
-    session.status = "completed";
+    if (session.status === "active") {
+      session.status = exitCode === 0 ? "completed" : "failed";
+    }
     logger.logEntry("Maestro", "Session ended", { level: "info" });
     statusManager.refresh();
 
@@ -350,11 +375,22 @@ async function main() {
     }
 
     await webServer.stop();
-    process.exit(0);
+    process.exit(exitCode);
   };
 
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => { void shutdown(0); });
+  process.on("SIGTERM", () => { void shutdown(0); });
+
+  try {
+    await orchestrationEngine.run(goal);
+    logger.logEntry("Maestro", "All planned waves completed", { level: "info" });
+    session.status = "completed";
+    await shutdown(0);
+  } catch (err: any) {
+    logger.logEntry("Maestro", `Orchestration failed: ${err.message}`, { level: "error" });
+    session.status = "failed";
+    await shutdown(1);
+  }
 }
 
 main().catch(err => {

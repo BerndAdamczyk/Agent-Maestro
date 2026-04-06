@@ -78,14 +78,28 @@ export class PromptAssembler {
     sections.push("\n---\n# Current Task\n");
     sections.push(`**Task ID:** ${delegation.taskId}`);
     sections.push(`**Title:** ${delegation.taskTitle}`);
+    sections.push(`**Task Type:** ${delegation.taskType}`);
     sections.push(`**Wave:** ${delegation.wave}`);
+    sections.push(`**Phase:** ${delegation.phase}`);
     sections.push(`**Time Budget:** ${delegation.timeBudget}s`);
     sections.push(`\n${delegation.taskDescription}`);
 
+    if (delegation.acceptanceCriteria.length > 0) {
+      sections.push("\n## Acceptance Criteria\n");
+      for (const criterion of delegation.acceptanceCriteria) {
+        sections.push(`- ${criterion}`);
+      }
+    }
+
     // 7. Plan-gate instructions
-    if (delegation.planFirst) {
+    if (delegation.planFirst && delegation.phase === "phase_1_plan") {
       sections.push("\n---\n# Plan-Gate Protocol\n");
-      sections.push(PLAN_GATE_INSTRUCTIONS);
+      sections.push(PHASE_1_PLAN_GATE_INSTRUCTIONS);
+    }
+
+    if (delegation.planFirst && delegation.phase === "phase_2_execute") {
+      sections.push("\n---\n# Execution Phase\n");
+      sections.push(PHASE_2_EXECUTION_INSTRUCTIONS);
     }
 
     // 8. Working directory
@@ -168,7 +182,7 @@ export class PromptAssembler {
   }
 }
 
-const PLAN_GATE_INSTRUCTIONS = `
+const PHASE_1_PLAN_GATE_INSTRUCTIONS = `
 ## IMPORTANT: Plan-First Protocol
 
 You are in **Phase 1: Planning**. DO NOT implement anything yet.
@@ -183,4 +197,13 @@ Your lead will review your approach and either:
 - Set status to "plan_revision_needed" with feedback → revise your approach
 
 Do NOT proceed to implementation until status is "plan_approved".
+`;
+
+const PHASE_2_EXECUTION_INSTRUCTIONS = `
+The proposed approach for this task has already been approved.
+
+1. Re-read the task file, including the Proposed Approach and any Revision Feedback
+2. Implement the approved plan
+3. Update the structured handoff report sections in the task file
+4. Set the task status to "complete" only when the work and handoff are both done
 `;
