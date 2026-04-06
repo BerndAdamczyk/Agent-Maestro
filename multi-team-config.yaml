@@ -56,14 +56,14 @@ teams:
 
 model_tier_policy:
   curator:
-    primary: "openai-codex/gpt-5.4"
-    fallback: "openai-codex/gpt-5.4-mini"
+    primary: "anthropic/claude-opus-4-6"
+    fallback: "anthropic/claude-sonnet-4-6"
   lead:
-    primary: "openai-codex/gpt-5.4"
-    fallback: "openai-codex/gpt-5.4-mini"
+    primary: "anthropic/claude-opus-4-6"
+    fallback: "anthropic/claude-sonnet-4-6"
   worker:
-    primary: "openai-codex/gpt-5.4-mini"
-    fallback: "openai-codex/gpt-5.4"
+    primary: "anthropic/claude-sonnet-4-6"
+    fallback: "anthropic/claude-haiku-4-6"
 
 memory:
   session_retention_days: 7

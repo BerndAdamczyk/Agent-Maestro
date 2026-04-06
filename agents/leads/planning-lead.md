@@ -1,7 +1,7 @@
 ---
 schema_version: "1.0"
 name: "Planning Lead"
-model: "openai-codex/gpt-5.4"
+model: "anthropic/claude-opus-4-6"
 model_tier: lead
 expertise: "memory/agents/planning-lead/"
 skills:

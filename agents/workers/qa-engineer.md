@@ -1,7 +1,7 @@
 ---
 schema_version: "1.0"
 name: "QA Engineer"
-model: "openai-codex/gpt-5.4"
+model: "anthropic/claude-sonnet-4-6"
 model_tier: worker
 expertise: "memory/agents/qa-engineer/"
 skills:
