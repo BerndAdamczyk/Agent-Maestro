@@ -14,10 +14,12 @@
  *  9. Model tier info
  */
 
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentDefinition, DelegationParams, SystemConfig } from "./types.js";
 import type { MemorySubsystem } from "./memory/index.js";
+import { atomicWrite } from "./utils.js";
+import { formatUntrustedWorkspaceSection, redactSecrets } from "./security.js";
 
 export class PromptAssembler {
   private rootDir: string;
@@ -93,7 +95,7 @@ export class PromptAssembler {
     const tierPolicy = this.config.model_tier_policy[agent.frontmatter.model_tier];
     sections.push(`**Model Tier:** ${agent.frontmatter.model_tier} (primary: ${tierPolicy.primary}, fallback: ${tierPolicy.fallback})\n`);
 
-    const assembled = sections.join("\n");
+    const assembled = redactSecrets(sections.join("\n"));
 
     // Write assembled prompt for auditability
     this.savePromptAudit(delegation.taskId, assembled);
@@ -108,30 +110,30 @@ export class PromptAssembler {
     // shared-context/README.md
     const readmePath = join(this.rootDir, this.config.paths.shared_context, "README.md");
     if (existsSync(readmePath)) {
-      parts.push(readFileSync(readmePath, "utf-8"));
+      parts.push(formatUntrustedWorkspaceSection("Shared Context", readFileSync(readmePath, "utf-8")));
     }
 
     // Goal
     const goalPath = join(wsDir, "goal.md");
     if (existsSync(goalPath)) {
-      parts.push("## Goal\n" + readFileSync(goalPath, "utf-8"));
+      parts.push(formatUntrustedWorkspaceSection("Goal", readFileSync(goalPath, "utf-8")));
     }
 
     // Plan (summarize if too long)
     const planPath = join(wsDir, "plan.md");
     if (existsSync(planPath)) {
       const plan = readFileSync(planPath, "utf-8");
-      parts.push("## Plan\n" + this.truncate(plan, 2000));
+      parts.push(formatUntrustedWorkspaceSection("Plan", this.truncate(plan, 2000)));
     }
 
     // Status (summarize if too long)
     const statusPath = join(wsDir, "status.md");
     if (existsSync(statusPath)) {
       const status = readFileSync(statusPath, "utf-8");
-      parts.push("## Status\n" + this.truncate(status, 2000));
+      parts.push(formatUntrustedWorkspaceSection("Status", this.truncate(status, 2000)));
     }
 
-    return parts.join("\n\n");
+    return parts.filter(Boolean).join("\n\n");
   }
 
   private extractDomainTags(agent: AgentDefinition, delegation: DelegationParams): string[] {
@@ -162,7 +164,7 @@ export class PromptAssembler {
     const dir = join(this.rootDir, this.config.paths.memory, "sessions");
     mkdirSync(dir, { recursive: true });
     const filePath = join(dir, `prompt-${taskId}.md`);
-    writeFileSync(filePath, assembled, "utf-8");
+    atomicWrite(filePath, assembled);
   }
 }
 

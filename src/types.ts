@@ -141,13 +141,72 @@ export const SystemConfigSchema = z.object({
 
 export type SystemConfig = z.infer<typeof SystemConfigSchema>;
 
+// ── Runtime Types ────────────────────────────────────────────────────
+
+export type RuntimeType = "tmux" | "dry-run" | "container" | "process";
+
+export interface RuntimeHandle {
+  id: string;
+  runtimeType: RuntimeType;
+  agentName: string;
+  taskId: string;
+  launchedAt: string;
+}
+
+export type RuntimeExitStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "unknown";
+
+export interface RuntimeArtifact {
+  path: string;
+  type: string;
+  description?: string;
+}
+
+export interface RuntimeMetrics {
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  tokenUsage?: number | null;
+  retryCount?: number;
+  failoverCount?: number;
+}
+
+export interface RuntimeResult {
+  exitStatus: RuntimeExitStatus;
+  handoffReportPath: string | null;
+  artifacts: RuntimeArtifact[];
+  metrics: RuntimeMetrics;
+}
+
+export interface AgentRuntimeLaunchParams {
+  agentName: string;
+  taskId: string;
+  systemPrompt: string;
+  taskFilePath: string;
+  workspaceRoot: string;
+  allowedTools: string[];
+  timeoutMs: number;
+  env?: Record<string, string>;
+}
+
+export interface AgentRuntimeResumeParams {
+  phase: TaskPhase;
+  message: string;
+  resumeToken?: string;
+}
+
 // ── Active Worker (runtime tracking) ─────────────────────────────────
 
 export interface ActiveWorker {
   instanceId: string;
   agentName: string;
   runtimeId: string;       // tmux pane ID or container ID
-  runtimeType: "tmux" | "container";
+  runtimeType: RuntimeType;
+  runtimeHandle: RuntimeHandle;
   taskId: string;
   role: "maestro" | "lead" | "worker";
   hierarchyLevel: number;
@@ -161,6 +220,7 @@ export interface ActiveWorker {
 export type TaskStatus =
   | "pending"
   | "in_progress"
+  | "stalled"
   | "plan_ready"
   | "plan_approved"
   | "plan_revision_needed"
@@ -184,6 +244,7 @@ export interface ParsedTask {
   createdAt: string;
   updatedAt: string;
   handoffReport: HandoffReport | null;
+  handoffValidation: HandoffValidation | null;
   proposedApproach: string | null;
   revisionFeedback: string | null;
 }
@@ -193,6 +254,14 @@ export interface HandoffReport {
   patternsFollowed: string;
   unresolvedConcerns: string;
   suggestedFollowups: string;
+}
+
+export type HandoffValidationStatus = "valid" | "invalid";
+
+export interface HandoffValidation {
+  status: HandoffValidationStatus;
+  validatedAt: string;
+  issues: string[];
 }
 
 // ── File Change Event (file watcher) ─────────────────────────────────

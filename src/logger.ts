@@ -8,6 +8,7 @@
 import { appendFileSync, existsSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LogEntry } from "./types.js";
+import { redactSecrets, stripUnsafeControlChars } from "./security.js";
 
 const LOG_HEADER = `# Activity Log
 
@@ -30,7 +31,7 @@ export class Logger {
 
   logEntry(agent: string, message: string): void {
     const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
-    const row = `| ${ts} | ${agent} | ${message} |\n`;
+    const row = `| ${ts} | ${this.formatCell(agent)} | ${this.formatCell(message)} |\n`;
     appendFileSync(this.logPath, row, "utf-8");
   }
 
@@ -38,6 +39,14 @@ export class Logger {
     if (!existsSync(this.logPath)) return [];
     const content = readFileSync(this.logPath, "utf-8");
     return parseLogEntries(content);
+  }
+
+  private formatCell(input: string): string {
+    return stripUnsafeControlChars(redactSecrets(input))
+      .replace(/\n+/g, " ")
+      .replace(/\s+/g, " ")
+      .replace(/\|/g, "/")
+      .trim();
   }
 }
 

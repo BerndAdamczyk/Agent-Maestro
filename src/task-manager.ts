@@ -5,7 +5,14 @@
 
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import type { ParsedTask, TaskStatus, TaskPhase, HandoffReport } from "./types.js";
+import type {
+  ParsedTask,
+  TaskStatus,
+  TaskPhase,
+  HandoffReport,
+  HandoffValidation,
+} from "./types.js";
+import { validateHandoffReport } from "./handoff-validator.js";
 
 const TASK_ID_RE = /^task-(\d+)\.md$/;
 
@@ -32,6 +39,10 @@ export class TaskManager {
 
   private taskFile(taskId: string): string {
     return join(this.tasksDir, `${taskId}.md`);
+  }
+
+  getTaskFilePath(taskId: string): string {
+    return this.taskFile(taskId);
   }
 
   createTask(params: {
@@ -62,6 +73,7 @@ export class TaskManager {
       createdAt: now,
       updatedAt: now,
       handoffReport: null,
+      handoffValidation: null,
       proposedApproach: null,
       revisionFeedback: null,
     };
@@ -101,8 +113,20 @@ export class TaskManager {
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
     task.handoffReport = report;
+    task.handoffValidation = null;
     task.updatedAt = new Date().toISOString();
     this.writeTask(task);
+  }
+
+  validateHandoff(taskId: string): HandoffValidation {
+    const task = this.readTask(taskId);
+    if (!task) throw new Error(`Task not found: ${taskId}`);
+
+    const validation = validateHandoffReport(task.handoffReport);
+    task.handoffValidation = validation;
+    task.updatedAt = new Date().toISOString();
+    this.writeTask(task);
+    return validation;
   }
 
   setProposedApproach(taskId: string, approach: string): void {
@@ -190,6 +214,24 @@ export class TaskManager {
       );
     }
 
+    if (task.handoffValidation) {
+      lines.push(
+        "## Validation",
+        "",
+        `**Handoff Validation:** ${task.handoffValidation.status}`,
+        `**Validated At:** ${task.handoffValidation.validatedAt}`,
+        "",
+      );
+
+      if (task.handoffValidation.issues.length > 0) {
+        lines.push("### Validation Issues", "");
+        for (const issue of task.handoffValidation.issues) {
+          lines.push(`- ${issue}`);
+        }
+        lines.push("");
+      }
+    }
+
     return lines.join("\n");
   }
 
@@ -225,6 +267,21 @@ export class TaskManager {
       };
     }
 
+    let handoffValidation: HandoffValidation | null = null;
+    const validationStatus = get("Handoff Validation");
+    if (validationStatus === "valid" || validationStatus === "invalid") {
+      const validationIssues = getSubSection("Validation Issues")
+        .split("\n")
+        .map(line => line.replace(/^- /, "").trim())
+        .filter(Boolean);
+
+      handoffValidation = {
+        status: validationStatus,
+        validatedAt: get("Validated At") || new Date().toISOString(),
+        issues: validationIssues,
+      };
+    }
+
     return {
       id: taskId,
       title: titleMatch?.[1] ?? "",
@@ -240,6 +297,7 @@ export class TaskManager {
       createdAt: get("Created") || new Date().toISOString(),
       updatedAt: get("Updated") || new Date().toISOString(),
       handoffReport,
+      handoffValidation,
       proposedApproach: getSection("Proposed Approach") || null,
       revisionFeedback: getSection("Revision Feedback") || null,
     };

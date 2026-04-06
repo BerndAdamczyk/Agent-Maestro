@@ -25,11 +25,15 @@ import { MonitorEngine } from "./monitor-engine.js";
 import { ReconcileEngine } from "./reconcile-engine.js";
 import { createWebServer } from "../web/server/index.js";
 import type { SystemConfig, SessionState, ActiveWorker } from "./types.js";
+import type { AgentRuntime } from "./runtime/agent-runtime.js";
+import { TmuxAgentRuntime } from "./runtime/tmux-agent-runtime.js";
+import { DryRunAgentRuntime } from "./runtime/dry-run-runtime.js";
 
 // ── CLI Args ─────────────────────────────────────────────────────────
 
 const isResume = process.argv.includes("--resume");
 const rootDir = process.env["MAESTRO_ROOT"] || process.cwd();
+const runtimeMode = (process.env["MAESTRO_RUNTIME"] || "tmux").toLowerCase();
 
 // ── Bootstrap ────────────────────────────────────────────────────────
 
@@ -37,6 +41,7 @@ async function main() {
   console.log("=== Agent Maestro v3.0 ===");
   console.log(`Root: ${rootDir}`);
   console.log(`Mode: ${isResume ? "resume" : "new session"}`);
+  console.log(`Runtime: ${runtimeMode}`);
 
   // Load config
   let config: SystemConfig;
@@ -77,16 +82,16 @@ async function main() {
   const taskManager = new TaskManager(workspaceDir);
   const statusManager = new StatusManager(workspaceDir, taskManager);
 
-  const runtimeManager = new RuntimeManager(config.tmux_session, config.limits.max_panes);
   const promptAssembler = new PromptAssembler(rootDir, config, memory);
+  const runtime = createAgentRuntime(runtimeMode, config);
 
   const delegationEngine = new DelegationEngine(
-    config, agentResolver, promptAssembler, runtimeManager,
+    rootDir, config, agentResolver, promptAssembler, runtime,
     taskManager, logger, memory,
   );
 
   const monitorEngine = new MonitorEngine(
-    runtimeManager, taskManager, logger, config.limits.stall_timeout_seconds,
+    runtime, taskManager, logger, config.limits.stall_timeout_seconds,
   );
 
   const reconcileEngine = new ReconcileEngine(rootDir, config, taskManager, logger);
@@ -167,9 +172,35 @@ async function main() {
     const workers = delegationEngine.getActiveWorkers();
     if (workers.size === 0) return;
 
+    consumeRuntimeControlSignals(workers, taskManager, runtime, logger);
     const results = monitorEngine.monitorAll(workers);
 
     for (const result of results) {
+      if (result.taskStatus === "complete") {
+        const validation = taskManager.validateHandoff(result.taskId);
+
+        if (validation.status === "invalid") {
+          taskManager.updateStatus(result.taskId, "in_progress");
+          logger.logEntry(
+            "Validation",
+            `Rejected handoff for ${result.taskId}: ${validation.issues.join("; ")}`
+          );
+
+          const worker = delegationEngine.getActiveWorker(result.taskId);
+          if (worker) {
+            runtime.resume(worker.runtimeHandle, {
+              phase: "phase_2_execute",
+              message: [
+                "Your handoff report was rejected by the lead-level validation gate.",
+                ...validation.issues.map(issue => `- ${issue}`),
+                "Revise the implementation or handoff report, then set the task status to complete again.",
+              ].join("\n"),
+            });
+          }
+          continue;
+        }
+      }
+
       // Handle completed workers
       if (result.taskStatus === "complete" || result.taskStatus === "failed") {
         delegationEngine.completeWorker(result.taskId);
@@ -184,7 +215,14 @@ async function main() {
       }
 
       // Handle dead runtimes
-      if (!result.runtimeAlive && result.taskStatus !== "complete" && result.taskStatus !== "failed") {
+      if (
+        !result.runtimeAlive &&
+        result.taskStatus !== "complete" &&
+        result.taskStatus !== "failed" &&
+        result.taskStatus !== "plan_ready" &&
+        result.taskStatus !== "plan_approved" &&
+        result.taskStatus !== "plan_revision_needed"
+      ) {
         logger.logEntry("Monitor", `Agent crashed: ${result.agentName} (${result.taskId})`);
         taskManager.updateStatus(result.taskId, "failed");
         delegationEngine.completeWorker(result.taskId);
@@ -230,3 +268,52 @@ main().catch(err => {
   console.error("Fatal:", err);
   process.exit(1);
 });
+
+function createAgentRuntime(mode: string, config: SystemConfig): AgentRuntime {
+  switch (mode) {
+    case "dry-run":
+    case "dryrun":
+      return new DryRunAgentRuntime(config.limits.max_panes);
+    case "tmux":
+      return new TmuxAgentRuntime(
+        new RuntimeManager(config.tmux_session, config.limits.max_panes),
+      );
+    default:
+      throw new Error(`Unsupported runtime '${mode}'. Expected 'tmux' or 'dry-run'.`);
+  }
+}
+
+function consumeRuntimeControlSignals(
+  workers: Map<string, ActiveWorker>,
+  taskManager: TaskManager,
+  runtime: AgentRuntime,
+  logger: Logger,
+): void {
+  for (const [taskId, worker] of workers) {
+    const task = taskManager.readTask(taskId);
+    if (!task) continue;
+
+    if (task.status === "plan_approved") {
+      runtime.resume(worker.runtimeHandle, {
+        phase: "phase_2_execute",
+        message: "The proposed approach is approved. Proceed to implementation and complete the task.",
+      });
+      taskManager.updateStatus(taskId, "in_progress");
+      logger.logEntry("Monitor", `Consumed plan_approved for ${taskId}; resumed ${worker.agentName} in phase_2_execute`);
+      continue;
+    }
+
+    if (task.status === "plan_revision_needed") {
+      runtime.resume(worker.runtimeHandle, {
+        phase: "phase_1_plan",
+        message: [
+          "Revise the proposed approach based on lead feedback.",
+          task.revisionFeedback ?? "No explicit feedback provided.",
+          "Do not implement yet. Update the Proposed Approach section and set status to plan_ready again.",
+        ].join("\n"),
+      });
+      taskManager.updateStatus(taskId, "in_progress");
+      logger.logEntry("Monitor", `Consumed plan_revision_needed for ${taskId}; resumed ${worker.agentName} in phase_1_plan`);
+    }
+  }
+}

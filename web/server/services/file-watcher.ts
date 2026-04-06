@@ -9,6 +9,7 @@ import { watch, type FSWatcher } from "chokidar";
 import { readFileSync } from "node:fs";
 import { relative } from "node:path";
 import type { FileChangeEvent, FileChangeType } from "../../../src/types.js";
+import { redactSecrets, stripUnsafeControlChars } from "../../../src/security.js";
 
 export type FileChangeHandler = (event: FileChangeEvent) => void;
 
@@ -55,7 +56,7 @@ export class FileWatcherService {
 
     let content = "";
     try {
-      content = readFileSync(filePath, "utf-8");
+      content = stripUnsafeControlChars(redactSecrets(readFileSync(filePath, "utf-8")));
     } catch {
       // File might have been deleted between event and read
     }
