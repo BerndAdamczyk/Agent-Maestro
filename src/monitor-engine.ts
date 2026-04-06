@@ -11,24 +11,24 @@
  */
 
 import type { ActiveWorker, MonitorResult, TaskStatus } from "./types.js";
-import type { RuntimeManager } from "./runtime-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { Logger } from "./logger.js";
+import type { AgentRuntime } from "./runtime/agent-runtime.js";
 
 export class MonitorEngine {
-  private runtimeManager: RuntimeManager;
+  private runtime: AgentRuntime;
   private taskManager: TaskManager;
   private logger: Logger;
   private stallTimeout: number;           // seconds
   private lastOutputCache = new Map<string, string>();  // taskId -> last captured output
 
   constructor(
-    runtimeManager: RuntimeManager,
+    runtime: AgentRuntime,
     taskManager: TaskManager,
     logger: Logger,
     stallTimeout: number = 120,
   ) {
-    this.runtimeManager = runtimeManager;
+    this.runtime = runtime;
     this.taskManager = taskManager;
     this.logger = logger;
     this.stallTimeout = stallTimeout;
@@ -50,16 +50,20 @@ export class MonitorEngine {
     };
 
     // 1. Runtime alive check
-    result.runtimeAlive = this.runtimeManager.isAlive(worker.runtimeId);
+    result.runtimeAlive = this.runtime.isAlive(worker.runtimeHandle);
 
     if (!result.runtimeAlive) {
       // Agent process is gone
-      this.logger.logEntry("Monitor", `Agent ${worker.agentName} (${worker.taskId}) runtime dead`);
+      this.logger.logEntry("Monitor", `Agent ${worker.agentName} (${worker.taskId}) runtime dead`, {
+        level: "warn",
+        taskId: worker.taskId,
+        correlationId: worker.correlationId,
+      });
       return result;
     }
 
     // 2. Activity detection (new output since last poll)
-    const currentOutput = this.runtimeManager.capturePane(worker.runtimeId, 50);
+    const currentOutput = this.runtime.getOutput(worker.runtimeHandle, 50);
     result.lastOutput = currentOutput;
 
     const previousOutput = this.lastOutputCache.get(worker.taskId) ?? "";
@@ -71,19 +75,30 @@ export class MonitorEngine {
     }
 
     // 3. Task status file check
+    let taskStatus: TaskStatus | null = null;
     const task = this.taskManager.readTask(worker.taskId);
     if (task) {
+      taskStatus = task.status;
       result.taskStatus = task.status;
+
+      if (task.status === "plan_ready" || task.status === "plan_approved" || task.status === "plan_revision_needed") {
+        return result;
+      }
     }
 
     // 4. Stall detection
     const secondsSinceOutput = (Date.now() - worker.lastOutputAt.getTime()) / 1000;
     result.isStalled = secondsSinceOutput > this.stallTimeout;
 
-    if (result.isStalled) {
+    if (result.isStalled && taskStatus !== "stalled") {
       this.logger.logEntry(
         "Monitor",
-        `Agent ${worker.agentName} (${worker.taskId}) stalled: no output for ${Math.round(secondsSinceOutput)}s`
+        `Agent ${worker.agentName} (${worker.taskId}) stalled: no output for ${Math.round(secondsSinceOutput)}s`,
+        {
+          level: "warn",
+          taskId: worker.taskId,
+          correlationId: worker.correlationId,
+        }
       );
     }
 
@@ -106,7 +121,7 @@ export class MonitorEngine {
    */
   isWaveComplete(wave: number): boolean {
     const tasks = this.taskManager.getTasksByWave(wave);
-    return tasks.every(t => t.status === "complete" || t.status === "failed");
+    return tasks.length > 0 && tasks.every(t => t.status === "complete");
   }
 
   /**

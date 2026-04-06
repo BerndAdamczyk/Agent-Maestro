@@ -6,7 +6,7 @@
  * and returns a token-budgeted context slice.
  */
 
-import { readFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 interface GraphIndex {
@@ -44,7 +44,6 @@ export class KnowledgeGraphLoader {
         "## Decisions",
         "",
       ].join("\n");
-      const { writeFileSync } = require("node:fs") as typeof import("node:fs");
       writeFileSync(indexPath, template, "utf-8");
     }
   }

@@ -33,6 +33,17 @@ export function taskRoutes(taskManager: TaskManager): Router {
     }
 
     if (req.body.status) {
+      if (req.body.status === "complete") {
+        const validation = taskManager.validateHandoff(req.params.id as string);
+        if (validation.status === "invalid") {
+          res.status(400).json({
+            error: "Handoff report validation failed",
+            validation,
+          });
+          return;
+        }
+      }
+
       taskManager.updateStatus(req.params.id as string, req.body.status as TaskStatus);
     }
 

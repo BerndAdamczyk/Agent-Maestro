@@ -4,8 +4,16 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import type { ParsedTask, TaskStatus, TaskPhase, HandoffReport } from "./types.js";
+import type {
+  ParsedTask,
+  TaskStatus,
+  TaskPhase,
+  HandoffReport,
+  HandoffValidation,
+} from "./types.js";
+import { validateHandoffReport } from "./handoff-validator.js";
 
 const TASK_ID_RE = /^task-(\d+)\.md$/;
 
@@ -34,24 +42,35 @@ export class TaskManager {
     return join(this.tasksDir, `${taskId}.md`);
   }
 
+  getTaskFilePath(taskId: string): string {
+    return this.taskFile(taskId);
+  }
+
   createTask(params: {
+    taskId?: string;
     title: string;
     description: string;
     assignedTo: string;
+    taskType?: string;
+    acceptanceCriteria?: string[];
     wave: number;
     dependencies?: string[];
     parentTask?: string | null;
     planFirst?: boolean;
     timeBudget?: number;
   }): ParsedTask {
-    const id = `task-${String(this.nextId++).padStart(3, "0")}`;
+    const id = params.taskId ?? `task-${String(this.nextId++).padStart(3, "0")}`;
+    this.bumpNextId(id);
     const now = new Date().toISOString();
 
     const task: ParsedTask = {
       id,
+      correlationId: randomUUID(),
       title: params.title,
       description: params.description,
       assignedTo: params.assignedTo,
+      taskType: params.taskType ?? "general",
+      acceptanceCriteria: params.acceptanceCriteria ?? [],
       status: "pending",
       phase: params.planFirst ? "phase_1_plan" : "none",
       wave: params.wave,
@@ -62,12 +81,62 @@ export class TaskManager {
       createdAt: now,
       updatedAt: now,
       handoffReport: null,
+      handoffValidation: null,
       proposedApproach: null,
       revisionFeedback: null,
     };
 
     this.writeTask(task);
     return task;
+  }
+
+  upsertTaskDefinition(params: {
+    taskId: string;
+    title: string;
+    description: string;
+    assignedTo: string;
+    taskType?: string;
+    acceptanceCriteria?: string[];
+    wave: number;
+    dependencies?: string[];
+    parentTask?: string | null;
+    planFirst?: boolean;
+    timeBudget?: number;
+  }): ParsedTask {
+    const existing = this.readTask(params.taskId);
+    if (!existing) {
+      return this.createTask(params);
+    }
+
+    existing.title = params.title;
+    existing.description = params.description;
+    existing.assignedTo = params.assignedTo;
+    existing.taskType = params.taskType ?? existing.taskType;
+    existing.acceptanceCriteria = params.acceptanceCriteria ?? existing.acceptanceCriteria;
+    existing.wave = params.wave;
+    existing.dependencies = params.dependencies ?? [];
+    existing.parentTask = params.parentTask ?? null;
+    existing.planFirst = params.planFirst ?? false;
+    existing.timeBudget = params.timeBudget ?? existing.timeBudget;
+
+    if (existing.planFirst && existing.phase === "none" && existing.status === "pending") {
+      existing.phase = "phase_1_plan";
+    }
+
+    if (!existing.planFirst && existing.phase === "phase_1_plan") {
+      existing.phase = "none";
+    }
+
+    existing.updatedAt = new Date().toISOString();
+    this.writeTask(existing);
+    return existing;
+  }
+
+  private bumpNextId(taskId: string): void {
+    const match = taskId.match(/^task-(\d+)$/);
+    if (!match) return;
+    const numericId = parseInt(match[1]!, 10);
+    this.nextId = Math.max(this.nextId, numericId + 1);
   }
 
   readTask(taskId: string): ParsedTask | null {
@@ -101,8 +170,20 @@ export class TaskManager {
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
     task.handoffReport = report;
+    task.handoffValidation = null;
     task.updatedAt = new Date().toISOString();
     this.writeTask(task);
+  }
+
+  validateHandoff(taskId: string): HandoffValidation {
+    const task = this.readTask(taskId);
+    if (!task) throw new Error(`Task not found: ${taskId}`);
+
+    const validation = validateHandoffReport(task.handoffReport);
+    task.handoffValidation = validation;
+    task.updatedAt = new Date().toISOString();
+    this.writeTask(task);
+    return validation;
   }
 
   setProposedApproach(taskId: string, approach: string): void {
@@ -147,7 +228,9 @@ export class TaskManager {
       `# ${task.id}: ${task.title}`,
       "",
       `**Status:** ${task.status}`,
+      `**Correlation ID:** ${task.correlationId}`,
       `**Assigned To:** ${task.assignedTo}`,
+      `**Task Type:** ${task.taskType}`,
       `**Wave:** ${task.wave}`,
       `**Phase:** ${task.phase}`,
       `**Plan First:** ${task.planFirst}`,
@@ -163,6 +246,14 @@ export class TaskManager {
       "",
     ];
 
+    if (task.acceptanceCriteria.length > 0) {
+      lines.push("## Acceptance Criteria", "");
+      for (const criterion of task.acceptanceCriteria) {
+        lines.push(`- ${criterion}`);
+      }
+      lines.push("");
+    }
+
     if (task.proposedApproach) {
       lines.push("## Proposed Approach", "", task.proposedApproach, "");
     }
@@ -173,7 +264,7 @@ export class TaskManager {
 
     if (task.handoffReport) {
       lines.push(
-        "## Output",
+        "## Handoff Report",
         "",
         "### Changes Made",
         task.handoffReport.changesMade,
@@ -188,6 +279,24 @@ export class TaskManager {
         task.handoffReport.suggestedFollowups,
         "",
       );
+    }
+
+    if (task.handoffValidation) {
+      lines.push(
+        "## Validation",
+        "",
+        `**Handoff Validation:** ${task.handoffValidation.status}`,
+        `**Validated At:** ${task.handoffValidation.validatedAt}`,
+        "",
+      );
+
+      if (task.handoffValidation.issues.length > 0) {
+        lines.push("### Validation Issues", "");
+        for (const issue of task.handoffValidation.issues) {
+          lines.push(`- ${issue}`);
+        }
+        lines.push("");
+      }
     }
 
     return lines.join("\n");
@@ -212,11 +321,18 @@ export class TaskManager {
       return match?.[1]?.trim() ?? "";
     };
 
+    const getListSection = (heading: string): string[] => {
+      return getSection(heading)
+        .split("\n")
+        .map(line => line.replace(/^- /, "").trim())
+        .filter(Boolean);
+    };
+
     const titleMatch = content.match(/^# .+?:\s*(.+)$/m);
     const deps = get("Dependencies");
 
     let handoffReport: HandoffReport | null = null;
-    if (content.includes("## Output")) {
+    if (content.includes("## Handoff Report") || content.includes("## Output")) {
       handoffReport = {
         changesMade: getSubSection("Changes Made"),
         patternsFollowed: getSubSection("Patterns Followed"),
@@ -225,11 +341,29 @@ export class TaskManager {
       };
     }
 
+    let handoffValidation: HandoffValidation | null = null;
+    const validationStatus = get("Handoff Validation");
+    if (validationStatus === "valid" || validationStatus === "invalid") {
+      const validationIssues = getSubSection("Validation Issues")
+        .split("\n")
+        .map(line => line.replace(/^- /, "").trim())
+        .filter(Boolean);
+
+      handoffValidation = {
+        status: validationStatus,
+        validatedAt: get("Validated At") || new Date().toISOString(),
+        issues: validationIssues,
+      };
+    }
+
     return {
       id: taskId,
+      correlationId: get("Correlation ID") || taskId,
       title: titleMatch?.[1] ?? "",
       description: getSection("Description"),
       assignedTo: get("Assigned To"),
+      taskType: get("Task Type") || "general",
+      acceptanceCriteria: getListSection("Acceptance Criteria"),
       status: (get("Status") || "pending") as TaskStatus,
       phase: (get("Phase") || "none") as TaskPhase,
       wave: parseInt(get("Wave") || "0", 10),
@@ -240,6 +374,7 @@ export class TaskManager {
       createdAt: get("Created") || new Date().toISOString(),
       updatedAt: get("Updated") || new Date().toISOString(),
       handoffReport,
+      handoffValidation,
       proposedApproach: getSection("Proposed Approach") || null,
       revisionFeedback: getSection("Revision Feedback") || null,
     };

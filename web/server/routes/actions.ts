@@ -30,7 +30,10 @@ export function actionRoutes(taskManager: TaskManager, logger: Logger): Router {
     }
 
     taskManager.updateStatus(taskId, "plan_approved");
-    logger.logEntry("Developer", `Approved plan for ${taskId}`);
+    logger.logEntry("Developer", `Approved plan for ${taskId}`, {
+      taskId,
+      correlationId: task.correlationId,
+    });
     res.json({ ok: true, task: taskManager.readTask(taskId) });
   });
 
@@ -49,7 +52,11 @@ export function actionRoutes(taskManager: TaskManager, logger: Logger): Router {
 
     taskManager.setRevisionFeedback(taskId, feedback);
     taskManager.updateStatus(taskId, "plan_revision_needed");
-    logger.logEntry("Developer", `Requested revision for ${taskId}: ${feedback}`);
+    logger.logEntry("Developer", `Requested revision for ${taskId}: ${feedback}`, {
+      level: "warn",
+      taskId,
+      correlationId: task.correlationId,
+    });
     res.json({ ok: true });
   });
 

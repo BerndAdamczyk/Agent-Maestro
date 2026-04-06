@@ -35,7 +35,7 @@ export const DomainRestrictionsSchema = z.object({
 export const ModelTierSchema = z.enum(["curator", "lead", "worker"]);
 
 export const AgentFrontmatterSchema = z.object({
-  schema_version: z.number().int().default(SCHEMA_VERSION),
+  schema_version: z.coerce.number().default(SCHEMA_VERSION),
   name: z.string().min(1),
   model: z.string().min(1),
   model_tier: ModelTierSchema,
@@ -112,7 +112,7 @@ export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
 // ── System Config (multi-team-config.yaml) ───────────────────────────
 
 export const SystemConfigSchema = z.object({
-  schema_version: z.number().int().default(SCHEMA_VERSION),
+  schema_version: z.coerce.number().default(SCHEMA_VERSION),
   project_name: z.string().default("agent-maestro"),
   paths: z.object({
     workspace: z.string().default("workspace"),
@@ -141,14 +141,118 @@ export const SystemConfigSchema = z.object({
 
 export type SystemConfig = z.infer<typeof SystemConfigSchema>;
 
+// ── Task Plan Types ──────────────────────────────────────────────────
+
+export const TaskPlanTaskSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  description: z.string().min(1),
+  assigned_to: z.string().min(1),
+  task_type: z.string().default("general"),
+  dependencies: z.array(z.string()).default([]),
+  parent_task: z.string().nullable().default(null),
+  plan_first: z.boolean().default(false),
+  time_budget: z.number().int().positive().default(600),
+  acceptance_criteria: z.array(z.string()).default([]),
+});
+
+export const TaskPlanSchema = z.object({
+  schema_version: z.coerce.number().default(SCHEMA_VERSION),
+  goal: z.string().min(1),
+  tasks: z.array(TaskPlanTaskSchema).min(1),
+  validation_commands: z.array(z.string().min(1)).default([]),
+});
+
+export type TaskPlanTask = z.infer<typeof TaskPlanTaskSchema>;
+export type TaskPlan = z.infer<typeof TaskPlanSchema>;
+
+export interface ResolvedTaskPlanTask extends TaskPlanTask {
+  wave: number;
+  originalOrder: number;
+}
+
+export interface ResolvedTaskPlan {
+  source: "workspace" | "llm";
+  sourcePath: string;
+  goal: string;
+  tasks: ResolvedTaskPlanTask[];
+  validation_commands: string[];
+}
+
+// ── Runtime Types ────────────────────────────────────────────────────
+
+export type RuntimeType = "tmux" | "dry-run" | "container" | "process";
+
+export interface RuntimeHandle {
+  id: string;
+  runtimeType: RuntimeType;
+  agentName: string;
+  taskId: string;
+  launchedAt: string;
+}
+
+export type RuntimeExitStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "unknown";
+
+export interface RuntimeArtifact {
+  path: string;
+  type: string;
+  description?: string;
+}
+
+export interface RuntimeMetrics {
+  startedAt: string;
+  finishedAt?: string;
+  durationMs?: number;
+  tokenUsage?: number | null;
+  retryCount?: number;
+  failoverCount?: number;
+}
+
+export interface RuntimeResult {
+  exitStatus: RuntimeExitStatus;
+  handoffReportPath: string | null;
+  artifacts: RuntimeArtifact[];
+  metrics: RuntimeMetrics;
+}
+
+export interface AgentRuntimeLaunchParams {
+  agentName: string;
+  taskId: string;
+  role: "maestro" | "lead" | "worker";
+  phase: TaskPhase;
+  model: string;
+  systemPrompt: string;
+  promptFilePath: string;
+  taskFilePath: string;
+  sessionFilePath: string;
+  policyManifestPath: string;
+  workspaceRoot: string;
+  allowedTools: string[];
+  timeoutMs: number;
+  env?: Record<string, string>;
+}
+
+export interface AgentRuntimeResumeParams {
+  phase: TaskPhase;
+  message: string;
+  resumeToken?: string;
+}
+
 // ── Active Worker (runtime tracking) ─────────────────────────────────
 
 export interface ActiveWorker {
   instanceId: string;
   agentName: string;
   runtimeId: string;       // tmux pane ID or container ID
-  runtimeType: "tmux" | "container";
+  runtimeType: RuntimeType;
+  runtimeHandle: RuntimeHandle;
   taskId: string;
+  correlationId: string;
   role: "maestro" | "lead" | "worker";
   hierarchyLevel: number;
   startedAt: Date;
@@ -161,6 +265,7 @@ export interface ActiveWorker {
 export type TaskStatus =
   | "pending"
   | "in_progress"
+  | "stalled"
   | "plan_ready"
   | "plan_approved"
   | "plan_revision_needed"
@@ -171,9 +276,12 @@ export type TaskPhase = "phase_1_plan" | "phase_2_execute" | "none";
 
 export interface ParsedTask {
   id: string;
+  correlationId: string;
   title: string;
   description: string;
   assignedTo: string;
+  taskType: string;
+  acceptanceCriteria: string[];
   status: TaskStatus;
   phase: TaskPhase;
   wave: number;
@@ -184,6 +292,7 @@ export interface ParsedTask {
   createdAt: string;
   updatedAt: string;
   handoffReport: HandoffReport | null;
+  handoffValidation: HandoffValidation | null;
   proposedApproach: string | null;
   revisionFeedback: string | null;
 }
@@ -193,6 +302,14 @@ export interface HandoffReport {
   patternsFollowed: string;
   unresolvedConcerns: string;
   suggestedFollowups: string;
+}
+
+export type HandoffValidationStatus = "valid" | "invalid";
+
+export interface HandoffValidation {
+  status: HandoffValidationStatus;
+  validatedAt: string;
+  issues: string[];
 }
 
 // ── File Change Event (file watcher) ─────────────────────────────────
@@ -217,8 +334,13 @@ export interface FileChangeEvent {
 
 // ── Log Entry ────────────────────────────────────────────────────────
 
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
 export interface LogEntry {
   timestamp: string;
+  level: LogLevel;
+  taskId: string | null;
+  correlationId: string | null;
   agent: string;
   message: string;
 }
@@ -284,12 +406,33 @@ export interface DelegationParams {
   taskId: string;
   taskTitle: string;
   taskDescription: string;
+  taskType: string;
+  acceptanceCriteria: string[];
+  phase: TaskPhase;
   wave: number;
   dependencies: string[];
   planFirst: boolean;
   timeBudget: number;
   parentTaskId: string | null;
   delegationDepth: number;
+}
+
+export interface RuntimePolicyManifest {
+  schema_version: number;
+  taskId: string;
+  agentName: string;
+  role: "maestro" | "lead" | "worker";
+  phase: TaskPhase;
+  workspaceRoot: string;
+  taskFilePath: string;
+  sessionFilePath: string;
+  promptFilePath: string;
+  denialLogPath: string;
+  allowedTools: string[];
+  domain: DomainRestrictions;
+  readRoots: string[];
+  writeRoots: string[];
+  deleteRoots: string[];
 }
 
 // ── Reconciliation Result ────────────────────────────────────────────

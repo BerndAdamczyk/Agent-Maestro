@@ -24,6 +24,9 @@ export class WebSocketHandler {
   constructor(server: Server, tmuxService: TmuxService) {
     this.tmuxService = tmuxService;
     this.wss = new WebSocketServer({ server });
+    this.wss.on("error", () => {
+      // Startup/listen errors are surfaced by the HTTP server promise path.
+    });
 
     this.wss.on("connection", (ws) => {
       this.paneSubscriptions.set(ws, []);

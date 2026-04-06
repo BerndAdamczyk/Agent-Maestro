@@ -13,6 +13,7 @@ export interface PaneInfo {
   windowName: string;
   active: boolean;
   pid: number;
+  processAlive: boolean;
   title: string;
 }
 
@@ -87,6 +88,10 @@ export class RuntimeManager {
     this.exec(`tmux send-keys -t ${paneId} ${JSON.stringify(sanitized)} Enter`);
   }
 
+  sendInterrupt(paneId: string): void {
+    this.exec(`tmux send-keys -t ${paneId} C-c`);
+  }
+
   /**
    * Capture the current pane output.
    */
@@ -104,7 +109,8 @@ export class RuntimeManager {
   isAlive(paneId: string): boolean {
     try {
       const result = this.exec(`tmux display-message -t ${paneId} -p "#{pane_pid}"`);
-      return result.length > 0;
+      const pid = parseInt(result, 10);
+      return this.pidIsAlive(pid);
     } catch {
       return false;
     }
@@ -138,6 +144,7 @@ export class RuntimeManager {
           windowName: windowName!,
           active: active === "1",
           pid: parseInt(pid!, 10),
+          processAlive: this.pidIsAlive(parseInt(pid!, 10)),
           title: title ?? "",
         };
       });
@@ -170,5 +177,16 @@ export class RuntimeManager {
 
   releasePaneId(paneId: string): void {
     this.activePanes.delete(paneId);
+  }
+
+  private pidIsAlive(pid: number): boolean {
+    if (!Number.isFinite(pid) || pid <= 0) return false;
+
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

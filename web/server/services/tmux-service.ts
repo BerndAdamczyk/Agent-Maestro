@@ -26,16 +26,25 @@ export class TmuxService {
     }
   }
 
-  listPanes(): Array<{ paneId: string; windowName: string; active: boolean }> {
+  listPanes(): Array<{ paneId: string; windowName: string; active: boolean; pid: number; processAlive: boolean; healthy: boolean }> {
     try {
       const output = execSync(
-        `tmux list-panes -s -t ${this.sessionName} -F "#{pane_id}|#{window_name}|#{pane_active}"`,
+        `tmux list-panes -s -t ${this.sessionName} -F "#{pane_id}|#{window_name}|#{pane_active}|#{pane_pid}"`,
         { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] }
       ).trim();
 
       return output.split("\n").filter(Boolean).map(line => {
-        const [paneId, windowName, active] = line.split("|");
-        return { paneId: paneId!, windowName: windowName!, active: active === "1" };
+        const [paneId, windowName, active, pidText] = line.split("|");
+        const pid = parseInt(pidText ?? "0", 10);
+        const processAlive = this.pidIsAlive(pid);
+        return {
+          paneId: paneId!,
+          windowName: windowName!,
+          active: active === "1",
+          pid,
+          processAlive,
+          healthy: processAlive,
+        };
       });
     } catch {
       return [];
@@ -58,5 +67,16 @@ export class TmuxService {
     execSync(`tmux send-keys -t ${paneId} ${JSON.stringify(sanitized)} Enter`, {
       stdio: "pipe",
     });
+  }
+
+  private pidIsAlive(pid: number): boolean {
+    if (!Number.isFinite(pid) || pid <= 0) return false;
+
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }

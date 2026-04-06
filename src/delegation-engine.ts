@@ -11,14 +11,16 @@ import type {
   SystemConfig,
   ActiveWorker,
   DelegationParams,
-  ParsedTask,
+  AgentDefinition,
 } from "./types.js";
 import type { AgentResolver } from "./config.js";
 import type { PromptAssembler } from "./prompt-assembler.js";
-import type { RuntimeManager } from "./runtime-manager.js";
 import type { TaskManager } from "./task-manager.js";
 import type { Logger } from "./logger.js";
 import type { MemorySubsystem } from "./memory/index.js";
+import { hasPiModelCredentials } from "./pi-runtime-support.js";
+import type { AgentRuntime } from "./runtime/agent-runtime.js";
+import { RuntimePolicyManager } from "./runtime/policy.js";
 
 export interface DelegationQueue {
   params: DelegationParams;
@@ -26,32 +28,37 @@ export interface DelegationQueue {
 }
 
 export class DelegationEngine {
+  private rootDir: string;
   private config: SystemConfig;
   private agentResolver: AgentResolver;
   private promptAssembler: PromptAssembler;
-  private runtimeManager: RuntimeManager;
+  private runtime: AgentRuntime;
   private taskManager: TaskManager;
   private logger: Logger;
   private memory: MemorySubsystem;
+  private policyManager: RuntimePolicyManager;
   private activeWorkers = new Map<string, ActiveWorker>();
   private delegationQueue: DelegationQueue[] = [];
 
   constructor(
+    rootDir: string,
     config: SystemConfig,
     agentResolver: AgentResolver,
     promptAssembler: PromptAssembler,
-    runtimeManager: RuntimeManager,
+    runtime: AgentRuntime,
     taskManager: TaskManager,
     logger: Logger,
     memory: MemorySubsystem,
   ) {
+    this.rootDir = rootDir;
     this.config = config;
     this.agentResolver = agentResolver;
     this.promptAssembler = promptAssembler;
-    this.runtimeManager = runtimeManager;
+    this.runtime = runtime;
     this.taskManager = taskManager;
     this.logger = logger;
     this.memory = memory;
+    this.policyManager = new RuntimePolicyManager(rootDir, config);
   }
 
   /**
@@ -59,6 +66,11 @@ export class DelegationEngine {
    * Creates task file, assembles prompt, spawns agent process.
    */
   async delegate(params: DelegationParams): Promise<ActiveWorker> {
+    const existingWorker = this.activeWorkers.get(params.taskId);
+    if (existingWorker) {
+      return existingWorker;
+    }
+
     // Depth guard
     if (params.delegationDepth > this.config.limits.max_delegation_depth) {
       throw new Error(
@@ -75,18 +87,13 @@ export class DelegationEngine {
     // Check agent has delegate capability (if needed)
     // Workers don't need delegate, they're being delegated TO
 
-    // Spawn budget check
-    if (!this.runtimeManager.hasCapacity()) {
-      this.logger.logEntry("Maestro", `Queuing delegation for '${params.agentName}' -- spawn budget full`);
-      this.delegationQueue.push({ params, queuedAt: new Date() });
-      throw new Error("Spawn budget exhausted, delegation queued");
-    }
-
-    // Create task file
-    const task = this.taskManager.createTask({
+    const task = this.taskManager.readTask(params.taskId) ?? this.taskManager.createTask({
+      taskId: params.taskId,
       title: params.taskTitle,
       description: params.taskDescription,
       assignedTo: params.agentName,
+      taskType: params.taskType,
+      acceptanceCriteria: params.acceptanceCriteria,
       wave: params.wave,
       dependencies: params.dependencies,
       parentTask: params.parentTaskId,
@@ -94,13 +101,25 @@ export class DelegationEngine {
       timeBudget: params.timeBudget,
     });
 
-    // Override task ID if pre-assigned
-    if (params.taskId && params.taskId !== task.id) {
-      // Use the pre-assigned ID (for fix-tasks etc.)
+    // Spawn budget check
+    if (!this.runtime.hasCapacity()) {
+      this.logger.logEntry("Maestro", `Queuing delegation for '${params.agentName}' -- spawn budget full`, {
+        level: "warn",
+        taskId: task.id,
+        correlationId: task.correlationId,
+      });
+      this.delegationQueue.push({ params, queuedAt: new Date() });
+      throw new Error("Spawn budget exhausted, delegation queued");
     }
 
     // Initialize session DAG (Level 1 memory)
     this.memory.sessionDAG.createSession(task.id);
+    this.memory.sessionDAG.append(task.id, {
+      role: "system",
+      tool: "delegate",
+      content: `Delegated ${task.id} to ${params.agentName} for wave ${params.wave}. Correlation ID: ${task.correlationId}`,
+      parentId: null,
+    });
 
     // Ensure agent memory directories exist
     this.memory.expertise.ensureAgentMemory(params.agentName);
@@ -110,26 +129,53 @@ export class DelegationEngine {
       ...params,
       taskId: task.id,
     });
+    const allowedTools = this.getAllowedTools(agent);
+    const role = this.agentResolver.getAgentRole(params.agentName);
+    const policy = this.policyManager.build({
+      taskId: task.id,
+      agentName: params.agentName,
+      role,
+      phase: task.phase,
+      taskFilePath: this.taskManager.getTaskFilePath(task.id),
+      allowedTools,
+      domain: agent.frontmatter.domain,
+    });
+    const model = this.pickLaunchModel(agent);
 
-    // Spawn agent in runtime
-    const paneId = this.runtimeManager.createPane(params.agentName);
-
-    // Build the agent launch command
-    // In dev mode, we pipe the prompt to the agent runtime
-    const promptFile = `memory/sessions/prompt-${task.id}.md`;
-    const logFile = `logs/${this.slugify(params.agentName)}.log`;
-    const launchCmd = this.buildLaunchCommand(params.agentName, promptFile, logFile, task.id);
-
-    this.runtimeManager.sendKeys(paneId, launchCmd);
+    const runtimeHandle = this.runtime.launch({
+      agentName: params.agentName,
+      taskId: task.id,
+      role,
+      phase: task.phase,
+      model,
+      systemPrompt: prompt,
+      promptFilePath: policy.promptFilePath,
+      taskFilePath: this.taskManager.getTaskFilePath(task.id),
+      sessionFilePath: policy.sessionFilePath,
+      policyManifestPath: this.policyManager.getPolicyManifestPath(task.id),
+      workspaceRoot: this.rootDir,
+      allowedTools,
+      timeoutMs: params.timeBudget * 1000,
+      env: {
+        MAESTRO_TASK_ID: task.id,
+        MAESTRO_AGENT_NAME: params.agentName,
+      },
+    });
+    this.memory.sessionDAG.append(task.id, {
+      role: "assistant",
+      content: `Runtime launched via ${runtimeHandle.runtimeType} with handle ${runtimeHandle.id}.`,
+    });
 
     // Track active worker
     const now = new Date();
     const worker: ActiveWorker = {
       instanceId: uuid(),
       agentName: params.agentName,
-      runtimeId: paneId,
-      runtimeType: "tmux",
+      runtimeId: runtimeHandle.id,
+      runtimeType: runtimeHandle.runtimeType,
+      runtimeHandle,
       taskId: task.id,
+      correlationId: task.correlationId,
       role: this.agentResolver.getAgentRole(params.agentName),
       hierarchyLevel: params.delegationDepth + 1,
       startedAt: now,
@@ -141,7 +187,11 @@ export class DelegationEngine {
 
     this.logger.logEntry(
       "Maestro",
-      `Delegated ${task.id} "${params.taskTitle}" to ${params.agentName} (pane: ${paneId}, wave: ${params.wave})`
+      `Delegated ${task.id} "${params.taskTitle}" to ${params.agentName} (${runtimeHandle.runtimeType}: ${runtimeHandle.id}, wave: ${params.wave}, model: ${model})`,
+      {
+        taskId: task.id,
+        correlationId: task.correlationId,
+      }
     );
 
     // Update task status
@@ -155,7 +205,7 @@ export class DelegationEngine {
    */
   processQueue(): DelegationParams | null {
     if (this.delegationQueue.length === 0) return null;
-    if (!this.runtimeManager.hasCapacity()) return null;
+    if (!this.runtime.hasCapacity()) return null;
 
     const next = this.delegationQueue.shift()!;
     return next.params;
@@ -168,27 +218,44 @@ export class DelegationEngine {
     const worker = this.activeWorkers.get(taskId);
     if (!worker) return;
 
-    // Clean up runtime
-    this.runtimeManager.destroyPane(worker.runtimeId);
-    this.runtimeManager.releasePaneId(worker.runtimeId);
+    this.runtime.destroy(worker.runtimeHandle);
     this.activeWorkers.delete(taskId);
 
-    this.logger.logEntry("Maestro", `Worker completed: ${taskId} (${worker.agentName})`);
+    this.logger.logEntry("Maestro", `Worker completed: ${taskId} (${worker.agentName})`, {
+      taskId,
+      correlationId: worker.correlationId,
+    });
   }
 
-  /**
-   * Build the command to launch an agent in its runtime.
-   * This creates a command that a coding-agent framework can execute.
-   */
-  private buildLaunchCommand(agentName: string, promptFile: string, logFile: string, taskId: string): string {
-    // The agent runtime command -- this is where the coding agent framework integration happens.
-    // For now, we use a generic approach that can work with various agent runtimes.
-    // The prompt file contains the full system prompt.
-    return `echo "Agent ${agentName} starting task ${taskId}..." && cat ${promptFile} | head -5 && echo "--- Agent runtime placeholder: integrate with Pi or similar framework ---"`;
+  private getAllowedTools(agent: AgentDefinition): string[] {
+    const supportedPiTools = new Set(["read", "write", "edit", "bash"]);
+    return Object.entries(agent.frontmatter.tools)
+      .filter(([tool, allowed]) => allowed && supportedPiTools.has(tool))
+      .map(([tool]) => tool);
   }
 
-  private slugify(name: string): string {
-    return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  private pickLaunchModel(agent: AgentDefinition): string {
+    const tierPolicy = this.config.model_tier_policy[agent.frontmatter.model_tier];
+    const candidates = [
+      agent.frontmatter.model,
+      tierPolicy.primary,
+      tierPolicy.fallback,
+    ];
+    const uniqueCandidates = [...new Set(candidates.filter(Boolean))];
+
+    const selected = uniqueCandidates.find(model => hasPiModelCredentials(model))
+      ?? uniqueCandidates[0]
+      ?? agent.frontmatter.model;
+
+    if (selected !== agent.frontmatter.model) {
+      this.logger.logEntry(
+        "Delegation",
+        `Switching ${agent.frontmatter.name} from ${agent.frontmatter.model} to ${selected} based on available Pi credentials`,
+        { level: "warn" },
+      );
+    }
+
+    return selected;
   }
 
   getActiveWorkers(): Map<string, ActiveWorker> {

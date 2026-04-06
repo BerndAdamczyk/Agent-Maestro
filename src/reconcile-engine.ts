@@ -28,7 +28,7 @@ export class ReconcileEngine {
    * Run a reconciliation command.
    */
   run(command: string): ReconcileResult {
-    this.logger.logEntry("Reconcile", `Running: ${command}`);
+    this.logger.logEntry("Reconcile", `Running: ${command}`, { level: "info" });
 
     let stdout = "";
     let stderr = "";
@@ -51,7 +51,8 @@ export class ReconcileEngine {
 
     this.logger.logEntry(
       "Reconcile",
-      `${command}: ${passed ? "PASSED" : `FAILED (exit ${exitCode})`}`
+      `${command}: ${passed ? "PASSED" : `FAILED (exit ${exitCode})`}`,
+      { level: passed ? "info" : "error" }
     );
 
     return { command, exitCode, stdout, stderr, passed };
@@ -106,7 +107,12 @@ export class ReconcileEngine {
 
           this.logger.logEntry(
             "Reconcile",
-            `Created fix-task ${fixTask.id} for '${cmd}' failure (attempt ${attempt}/${maxRetries})`
+            `Created fix-task ${fixTask.id} for '${cmd}' failure (attempt ${attempt}/${maxRetries})`,
+            {
+              level: "warn",
+              taskId: fixTask.id,
+              correlationId: fixTask.correlationId,
+            }
           );
 
           // Don't continue checking other commands -- fix first
@@ -115,18 +121,22 @@ export class ReconcileEngine {
       }
 
       if (allPassed) {
-        this.logger.logEntry("Reconcile", `All commands passed on attempt ${attempt}`);
+        this.logger.logEntry("Reconcile", `All commands passed on attempt ${attempt}`, { level: "info" });
         return { passed: true, fixTaskIds, attempts: attempt };
       }
 
       if (attempt < maxRetries) {
-        this.logger.logEntry("Reconcile", `Attempt ${attempt}/${maxRetries} failed, will retry after fix-task`);
+        this.logger.logEntry("Reconcile", `Attempt ${attempt}/${maxRetries} failed, will retry after fix-task`, {
+          level: "warn",
+        });
         // In a real execution, we'd wait for the fix-task to complete before retrying.
         // The orchestration loop handles this.
       }
     }
 
-    this.logger.logEntry("Reconcile", `All ${maxRetries} attempts exhausted. Escalating to user.`);
+    this.logger.logEntry("Reconcile", `All ${maxRetries} attempts exhausted. Escalating to user.`, {
+      level: "error",
+    });
     return { passed: false, fixTaskIds, attempts: maxRetries };
   }
 }
