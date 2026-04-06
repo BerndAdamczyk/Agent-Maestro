@@ -318,3 +318,162 @@ test("DelegationEngine rebuilds runtime policy and tool access when a plan-first
   assert.deepEqual(refreshedPolicy.allowedTools, ["read", "write", "edit", "bash"]);
   assert.deepEqual(refreshedPolicy.domain.upsert, ["workspace/**", "src/runtime/**"]);
 });
+
+test("DelegationEngine honors MAESTRO_MODEL_PRESET over the agent frontmatter model", async () => {
+  const previousPreset = process.env["MAESTRO_MODEL_PRESET"];
+  const previousAnthropicKey = process.env["ANTHROPIC_API_KEY"];
+  process.env["MAESTRO_MODEL_PRESET"] = "codex";
+  process.env["ANTHROPIC_API_KEY"] = "anthropic-key";
+
+  try {
+    const rootDir = mkdtempSync(join(tmpdir(), "agent-maestro-delegation-preset-"));
+    mkdirSync(join(rootDir, "workspace", "tasks"), { recursive: true });
+    mkdirSync(join(rootDir, "workspace", "runtime-policies"), { recursive: true });
+    mkdirSync(join(rootDir, "workspace", "runtime-state"), { recursive: true });
+    mkdirSync(join(rootDir, "workspace", "runtime-sessions"), { recursive: true });
+    mkdirSync(join(rootDir, "memory", "sessions"), { recursive: true });
+
+    const config = {
+      paths: {
+        workspace: "workspace",
+        memory: "memory",
+      },
+      limits: {
+        max_delegation_depth: 5,
+      },
+      model_tier_policy: {
+        curator: { primary: "openai-codex/gpt-5.4", fallback: "openai-codex/gpt-5.4-mini" },
+        lead: { primary: "openai-codex/gpt-5.4", fallback: "openai-codex/gpt-5.4-mini" },
+        worker: { primary: "openai-codex/gpt-5.4-mini", fallback: "openai-codex/gpt-5.4" },
+      },
+    };
+
+    const agent = {
+      frontmatter: {
+        name: "Backend Dev",
+        model: "anthropic/claude-sonnet-4-6",
+        model_tier: "worker",
+        expertise: "backend",
+        skills: [],
+        tools: {
+          read: true,
+          write: true,
+          edit: true,
+          bash: false,
+          delegate: false,
+          update_memory: false,
+          query_notebooklm: false,
+        },
+        memory: {
+          write_levels: [1, 2],
+          domain_lock: null,
+        },
+        domain: {
+          read: ["**/*"],
+          upsert: ["workspace/**", "src/**"],
+          delete: [],
+        },
+      },
+      body: "# Backend Dev",
+      filePath: join(rootDir, "agents", "backend-dev.md"),
+    };
+
+    const launches = [];
+    let task = null;
+
+    const engine = new DelegationEngine(
+      rootDir,
+      config,
+      {
+        findAgentByName: name => name === "Backend Dev" ? agent : null,
+        getAgentRole: () => "worker",
+      },
+      {
+        assemble: () => "SYSTEM PROMPT",
+      },
+      {
+        hasCapacity: () => true,
+        launch: params => {
+          launches.push(params);
+          return {
+            id: "proc-003",
+            runtimeType: "process",
+            agentName: params.agentName,
+            taskId: params.taskId,
+            launchedAt: new Date().toISOString(),
+          };
+        },
+        destroy: () => {},
+      },
+      {
+        readTask: taskId => task && task.id === taskId ? task : null,
+        createTask: params => {
+          task = {
+            id: params.taskId,
+            title: params.title,
+            description: params.description,
+            assignedTo: params.assignedTo,
+            taskType: params.taskType,
+            acceptanceCriteria: params.acceptanceCriteria,
+            writeScope: ["src/**"],
+            status: "pending",
+            phase: "none",
+            wave: params.wave,
+            dependencies: params.dependencies,
+            parentTask: params.parentTask,
+            planFirst: params.planFirst,
+            timeBudget: params.timeBudget,
+            correlationId: "corr-task-006",
+          };
+          return task;
+        },
+        updateStatus: (_taskId, status) => {
+          if (task) task.status = status;
+        },
+        getTaskFilePath: taskId => join(rootDir, "workspace", "tasks", `${taskId}.md`),
+      },
+      {
+        logEntry: () => {},
+      },
+      {
+        sessionDAG: {
+          createSession: () => {},
+          append: () => {},
+        },
+        expertise: {
+          ensureAgentMemory: () => {},
+        },
+      },
+    );
+
+    await engine.delegate({
+      taskId: "task-006",
+      taskTitle: "Use selected model preset",
+      taskDescription: "Verify model selection honors the configured preset.",
+      agentName: "Backend Dev",
+      taskType: "implementation",
+      acceptanceCriteria: ["Launch uses the preset model family"],
+      wave: 2,
+      dependencies: [],
+      parentTaskId: null,
+      planFirst: false,
+      timeBudget: 300,
+      delegationDepth: 2,
+    });
+
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0].model, "openai-codex/gpt-5.4-mini");
+  } finally {
+    if (typeof previousPreset === "undefined") {
+      delete process.env["MAESTRO_MODEL_PRESET"];
+    } else {
+      process.env["MAESTRO_MODEL_PRESET"] = previousPreset;
+    }
+
+    if (typeof previousAnthropicKey === "undefined") {
+      delete process.env["ANTHROPIC_API_KEY"];
+    } else {
+      process.env["ANTHROPIC_API_KEY"] = previousAnthropicKey;
+    }
+  }
+});

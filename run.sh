@@ -11,6 +11,7 @@ TARGET_ROOT="$(cd "${MAESTRO_TARGET_ROOT:-$SCRIPT_DIR}" && pwd)"
 SESSION_NAME="${MAESTRO_TMUX_SESSION:-agent-maestro}"
 WEB_PORT="${MAESTRO_PORT:-3000}"
 WEB_HOST="${MAESTRO_HOST:-127.0.0.1}"
+MODEL_PRESET="${MAESTRO_MODEL_PRESET:-}"
 
 archive_workspace() {
   local workspace_dir="$TARGET_ROOT/workspace"
@@ -26,7 +27,7 @@ archive_workspace() {
 }
 
 build_maestro_command() {
-  local command="cd '$SCRIPT_DIR' && MAESTRO_ROOT='$TARGET_ROOT' MAESTRO_DEV_MODE='$DEV_MODE' MAESTRO_TMUX_SESSION='$SESSION_NAME' MAESTRO_PORT='$WEB_PORT' MAESTRO_HOST='$WEB_HOST' node dist/src/main.js"
+  local command="cd '$SCRIPT_DIR' && MAESTRO_ROOT='$TARGET_ROOT' MAESTRO_DEV_MODE='$DEV_MODE' MAESTRO_TMUX_SESSION='$SESSION_NAME' MAESTRO_PORT='$WEB_PORT' MAESTRO_HOST='$WEB_HOST' MAESTRO_MODEL_PRESET='$MODEL_PRESET' node dist/src/main.js"
   if [[ "$RESUME" == "true" ]]; then
     command="$command --resume"
   fi
@@ -44,6 +45,7 @@ usage() {
   echo "Options:"
   echo "  --resume    Resume an existing session from workspace state"
   echo "  --dev       Force dev mode (all agents in tmux, no containers)"
+  echo "  --model     Override model family for this run: claude or codex"
   echo "  --help      Show this help"
   exit 1
 }
@@ -56,10 +58,22 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --resume)  RESUME=true; shift ;;
     --dev)     DEV_MODE=true; shift ;;
+    --model)
+      shift
+      [[ $# -gt 0 ]] || usage
+      MODEL_PRESET="$1"
+      shift
+      ;;
     --help)    usage ;;
     *)         GOAL="$1"; shift ;;
   esac
 done
+
+if [[ -n "$MODEL_PRESET" && "$MODEL_PRESET" != "claude" && "$MODEL_PRESET" != "codex" ]]; then
+  echo "Unsupported model preset: $MODEL_PRESET"
+  echo "Expected one of: claude, codex"
+  exit 1
+fi
 
 if [[ "$RESUME" == "false" && -z "$GOAL" ]]; then
   usage
@@ -114,5 +128,8 @@ fi
 echo "Maestro launched in tmux session '$SESSION_NAME'"
 echo "  Code launcher: $SCRIPT_DIR"
 echo "  Target repo: $TARGET_ROOT"
+if [[ -n "$MODEL_PRESET" ]]; then
+  echo "  Model preset: $MODEL_PRESET"
+fi
 echo "  Attach: tmux attach -t $SESSION_NAME"
 echo "  Web UI: http://$WEB_HOST:$WEB_PORT"

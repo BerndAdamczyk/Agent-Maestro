@@ -63,6 +63,15 @@ Start a new session with a goal:
 ./run.sh "Build auth module"
 ```
 
+Switch the whole run between the built-in Claude and Codex presets:
+
+```bash
+./run.sh --model claude "Build auth module"
+./run.sh --model codex "Build auth module"
+```
+
+The same override is available as `MAESTRO_MODEL_PRESET=claude|codex`.
+
 Then open:
 
 - `http://localhost:3000`

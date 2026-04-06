@@ -82,6 +82,99 @@ test("loadConfig rejects lead teams that can delegate but have no workers config
   );
 });
 
+test("loadConfig applies the codex model preset override", () => {
+  const rootDir = makeRoot();
+
+  writeConfig(rootDir, {
+    teams: `
+  - name: Engineering
+    lead: { name: Lead One, file: lead.md, color: "#00aa00" }
+    workers:
+      - { name: Worker One, file: worker.md, color: "#0000aa" }
+`,
+  });
+
+  writeAgent(rootDir, "maestro.md", {
+    name: "Maestro",
+    model: "anthropic/claude-opus-4-6",
+    model_tier: "curator",
+    delegate: true,
+    write_levels: "[1, 2, 3, 4]",
+  });
+  writeAgent(rootDir, "lead.md", {
+    name: "Lead One",
+    model: "anthropic/claude-opus-4-6",
+    model_tier: "lead",
+    delegate: true,
+    write_levels: "[1, 2, 3]",
+  });
+  writeAgent(rootDir, "worker.md", {
+    name: "Worker One",
+    model: "anthropic/claude-sonnet-4-6",
+    model_tier: "worker",
+    delegate: false,
+    write_levels: "[1, 2]",
+  });
+
+  withEnv({ MAESTRO_MODEL_PRESET: "codex" }, () => {
+    const config = loadConfig(rootDir);
+    assert.deepEqual(config.model_tier_policy, {
+      curator: {
+        primary: "openai-codex/gpt-5.4",
+        fallback: "openai-codex/gpt-5.4-mini",
+      },
+      lead: {
+        primary: "openai-codex/gpt-5.4",
+        fallback: "openai-codex/gpt-5.4-mini",
+      },
+      worker: {
+        primary: "openai-codex/gpt-5.4-mini",
+        fallback: "openai-codex/gpt-5.4",
+      },
+    });
+  });
+});
+
+test("loadConfig rejects unsupported model presets", () => {
+  const rootDir = makeRoot();
+
+  writeConfig(rootDir, {
+    teams: `
+  - name: Engineering
+    lead: { name: Lead One, file: lead.md, color: "#00aa00" }
+    workers:
+      - { name: Worker One, file: worker.md, color: "#0000aa" }
+`,
+  });
+
+  writeAgent(rootDir, "maestro.md", {
+    name: "Maestro",
+    model: "openai-codex/gpt-5.4",
+    model_tier: "curator",
+    delegate: true,
+    write_levels: "[1, 2, 3, 4]",
+  });
+  writeAgent(rootDir, "lead.md", {
+    name: "Lead One",
+    model: "openai-codex/gpt-5.4-mini",
+    model_tier: "lead",
+    delegate: true,
+    write_levels: "[1, 2, 3]",
+  });
+  writeAgent(rootDir, "worker.md", {
+    name: "Worker One",
+    model: "openai-codex/gpt-5.4-mini",
+    model_tier: "worker",
+    delegate: false,
+    write_levels: "[1, 2]",
+  });
+
+  assert.throws(
+    () => withEnv({ MAESTRO_MODEL_PRESET: "mistral" }, () => loadConfig(rootDir)),
+    /Unsupported MAESTRO_MODEL_PRESET 'mistral'/,
+  );
+});
+
 function makeRoot() {
   const rootDir = mkdtempSync(join(tmpdir(), "agent-maestro-config-"));
   mkdirSync(join(rootDir, "agents"), { recursive: true });
@@ -165,4 +258,28 @@ domain:
 
 # ${name}
 `, "utf-8");
+}
+
+function withEnv(overrides, fn) {
+  const previous = new Map();
+  for (const [key, value] of Object.entries(overrides)) {
+    previous.set(key, process.env[key]);
+    if (value == null) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of previous.entries()) {
+      if (typeof value === "undefined") {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  }
 }

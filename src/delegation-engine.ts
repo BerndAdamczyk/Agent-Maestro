@@ -23,6 +23,7 @@ import type { PromptAssembler } from "./prompt-assembler.js";
 import type { TaskManager } from "./task-manager.js";
 import type { Logger } from "./logger.js";
 import type { MemorySubsystem } from "./memory/index.js";
+import { resolveModelPreset } from "./model-presets.js";
 import { hasPiModelCredentials } from "./pi-runtime-support.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { RuntimePolicyManager } from "./runtime/policy.js";
@@ -255,10 +256,11 @@ export class DelegationEngine {
 
   private pickLaunchModel(agent: AgentDefinition): string {
     const tierPolicy = this.config.model_tier_policy[agent.frontmatter.model_tier];
+    const activePreset = resolveModelPreset(process.env["MAESTRO_MODEL_PRESET"]);
     const candidates = [
       tierPolicy.primary,
       tierPolicy.fallback,
-      agent.frontmatter.model,
+      ...(activePreset ? [] : [agent.frontmatter.model]),
     ];
     const uniqueCandidates = [...new Set(candidates.filter(Boolean))];
 
@@ -314,7 +316,7 @@ export class DelegationEngine {
     return this.activeWorkers.get(taskId);
   }
 
-  refreshWorkerRuntimeContext(taskId: string, phase: TaskPhase): RuntimePolicyManifest | null {
+  refreshWorkerRuntimeContext(taskId: string, phase: TaskPhase): (RuntimePolicyManifest & { policyManifestPath: string }) | null {
     const worker = this.activeWorkers.get(taskId);
     if (!worker) return null;
 
@@ -341,7 +343,7 @@ export class DelegationEngine {
     });
 
     const allowedTools = this.getAllowedTools(agent);
-    return this.policyManager.build({
+    const manifest = this.policyManager.build({
       taskId: task.id,
       agentName: worker.agentName,
       role: worker.role,
@@ -351,6 +353,11 @@ export class DelegationEngine {
       domain: agent.frontmatter.domain,
       taskWriteScope: task.writeScope,
     });
+
+    return {
+      ...manifest,
+      policyManifestPath: this.policyManager.getPolicyManifestPath(task.id),
+    };
   }
 
   getQueueLength(): number {

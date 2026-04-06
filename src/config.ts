@@ -13,6 +13,7 @@ import {
   type AgentDefinition,
   type AgentFrontmatter,
 } from "./types.js";
+import { getModelPresetPolicy, resolveModelPreset } from "./model-presets.js";
 
 // ── Frontmatter Parser ───────────────────────────────────────────────
 
@@ -39,6 +40,10 @@ export function loadConfig(rootDir: string): SystemConfig {
   const raw = readFileSync(configPath, "utf-8");
   const parsed = parseYAML(raw) as Record<string, unknown>;
   const config = SystemConfigSchema.parse(parsed);
+  const modelPreset = resolveModelPreset(process.env["MAESTRO_MODEL_PRESET"]);
+  if (modelPreset) {
+    config.model_tier_policy = getModelPresetPolicy(modelPreset);
+  }
   const tmuxSessionOverride = process.env["MAESTRO_TMUX_SESSION"]?.trim();
   if (tmuxSessionOverride) {
     config.tmux_session = tmuxSessionOverride;
