@@ -2,5 +2,8 @@ node_modules/
 dist/
 *.log
 .claude/
+.codex/
+/workspace/
+/workspace.bak.*/
 memory/sessions/*.jsonl
 memory/sessions/prompt-*.md

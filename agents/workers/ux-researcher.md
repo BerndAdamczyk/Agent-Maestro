@@ -1,7 +1,7 @@
 ---
 schema_version: "1.0"
 name: "UX Researcher"
-model: "anthropic/claude-sonnet-4-6"
+model: "openai-codex/gpt-5.4"
 model_tier: worker
 expertise: "memory/agents/ux-researcher/"
 skills:

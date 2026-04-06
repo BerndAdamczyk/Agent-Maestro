@@ -1,7 +1,7 @@
 ---
 schema_version: "1.0"
 name: "Validation Lead"
-model: "google/gemini-2.5-pro"
+model: "openai-codex/gpt-5.4"
 model_tier: lead
 expertise: "memory/agents/validation-lead/"
 skills:

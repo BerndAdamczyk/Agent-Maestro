@@ -40,6 +40,8 @@ npm install -g @mariozechner/pi-coding-agent
 
 If `pi` is not installed locally, agent execution will fail even though the project itself builds.
 
+Maestro reuses Pi credentials from `~/.pi/agent/auth.json`. It also bridges `codex login` state from `~/.codex/auth.json`, so stored OpenAI API keys and ChatGPT Codex subscriptions can be used without a separate Pi login.
+
 ## Install
 
 ```bash

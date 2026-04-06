@@ -1,7 +1,7 @@
 ---
 schema_version: "1.0"
 name: "Maestro"
-model: "google/gemini-2.5-pro"
+model: "openai-codex/gpt-5.4"
 model_tier: curator
 expertise: "memory/agents/maestro/"
 skills:

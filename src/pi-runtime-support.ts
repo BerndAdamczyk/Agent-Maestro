@@ -1,8 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const PI_LOOKUP_COMMAND = "command -v pi";
+const PI_AUTH_FILENAME = "auth.json";
+const OPENAI_CODEX_PROVIDER = "openai-codex";
+const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
+const preparedPiAgentDirs = new Map<string, string>();
 
 const FORWARDED_PROVIDER_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
@@ -88,22 +93,27 @@ export function getForwardedProviderEnv(env: NodeJS.ProcessEnv = process.env): R
     }
   }
 
+  if (!forwarded["OPENAI_API_KEY"]) {
+    const codexApiKey = readCodexOpenAIApiKey(env);
+    if (codexApiKey) {
+      forwarded["OPENAI_API_KEY"] = codexApiKey;
+    }
+  }
+
   return forwarded;
 }
 
 export function resolvePiAgentDir(env: NodeJS.ProcessEnv = process.env): string | null {
-  const explicit = env["PI_CODING_AGENT_DIR"]?.trim();
-  if (explicit && existsSync(explicit)) {
-    return explicit;
+  const baseDir = resolveBasePiAgentDir(env);
+  const baseAuthEntries = readAuthEntries(baseDir ? join(baseDir, PI_AUTH_FILENAME) : null);
+  const mergedAuthEntries = readPiAuthEntries(env);
+  const needsPreparedDir = Object.keys(mergedAuthEntries).some(provider => !(provider in baseAuthEntries));
+
+  if (!needsPreparedDir) {
+    return baseDir;
   }
 
-  const home = env["HOME"]?.trim();
-  if (!home) {
-    return null;
-  }
-
-  const defaultDir = join(home, ".pi", "agent");
-  return existsSync(defaultDir) ? defaultDir : null;
+  return preparePiAgentDir(baseDir, mergedAuthEntries, env);
 }
 
 export function hasPiModelCredentials(model: string, env: NodeJS.ProcessEnv = process.env): boolean {
@@ -137,13 +147,59 @@ function candidateShells(env: NodeJS.ProcessEnv): string[] {
 }
 
 function readPiAuthEntries(env: NodeJS.ProcessEnv): Record<string, unknown> {
-  const agentDir = resolvePiAgentDir(env);
-  if (!agentDir) {
-    return {};
+  const authEntries = readAuthEntries(resolveBasePiAgentAuthPath(env));
+
+  for (const [provider, credential] of Object.entries(buildCodexPiAuthEntries(env))) {
+    if (!(provider in authEntries)) {
+      authEntries[provider] = credential;
+    }
   }
 
-  const authPath = join(agentDir, "auth.json");
-  if (!existsSync(authPath)) {
+  return authEntries;
+}
+
+function resolveBasePiAgentDir(env: NodeJS.ProcessEnv): string | null {
+  const explicit = env["PI_CODING_AGENT_DIR"]?.trim();
+  if (explicit && existsSync(explicit)) {
+    return explicit;
+  }
+
+  const home = env["HOME"]?.trim();
+  if (!home) {
+    return null;
+  }
+
+  const defaultDir = join(home, ".pi", "agent");
+  return existsSync(defaultDir) ? defaultDir : null;
+}
+
+function resolveBasePiAgentAuthPath(env: NodeJS.ProcessEnv): string | null {
+  const agentDir = resolveBasePiAgentDir(env);
+  return agentDir ? join(agentDir, PI_AUTH_FILENAME) : null;
+}
+
+function resolveCodexDir(env: NodeJS.ProcessEnv): string | null {
+  const explicit = env["CODEX_HOME"]?.trim();
+  if (explicit && existsSync(explicit)) {
+    return explicit;
+  }
+
+  const home = env["HOME"]?.trim();
+  if (!home) {
+    return null;
+  }
+
+  const defaultDir = join(home, ".codex");
+  return existsSync(defaultDir) ? defaultDir : null;
+}
+
+function resolveCodexAuthPath(env: NodeJS.ProcessEnv): string | null {
+  const codexDir = resolveCodexDir(env);
+  return codexDir ? join(codexDir, PI_AUTH_FILENAME) : null;
+}
+
+function readAuthEntries(authPath: string | null): Record<string, unknown> {
+  if (!authPath || !existsSync(authPath)) {
     return {};
   }
 
@@ -153,4 +209,161 @@ function readPiAuthEntries(env: NodeJS.ProcessEnv): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function readCodexOpenAIApiKey(env: NodeJS.ProcessEnv): string | null {
+  const codexAuth = readCodexAuth(env);
+  return normalizeString(codexAuth?.["OPENAI_API_KEY"]);
+}
+
+function readCodexAuth(env: NodeJS.ProcessEnv): Record<string, unknown> | null {
+  const authEntries = readAuthEntries(resolveCodexAuthPath(env));
+  return Object.keys(authEntries).length > 0 ? authEntries : null;
+}
+
+function buildCodexPiAuthEntries(env: NodeJS.ProcessEnv): Record<string, unknown> {
+  const codexAuth = readCodexAuth(env);
+  if (!codexAuth) {
+    return {};
+  }
+
+  const authMode = normalizeString(codexAuth["auth_mode"]);
+  const openAIApiKey = normalizeString(codexAuth["OPENAI_API_KEY"]);
+  const openAICodexOAuth = buildOpenAICodexOAuthCredential(codexAuth);
+  const entries: Record<string, unknown> = {};
+
+  if (openAIApiKey) {
+    entries["openai"] = {
+      type: "api_key",
+      key: openAIApiKey,
+    };
+  }
+
+  if (authMode === "api_key") {
+    if (openAIApiKey) {
+      entries[OPENAI_CODEX_PROVIDER] = {
+        type: "api_key",
+        key: openAIApiKey,
+      };
+    } else if (openAICodexOAuth) {
+      entries[OPENAI_CODEX_PROVIDER] = openAICodexOAuth;
+    }
+    return entries;
+  }
+
+  if (openAICodexOAuth) {
+    entries[OPENAI_CODEX_PROVIDER] = openAICodexOAuth;
+  } else if (openAIApiKey) {
+    entries[OPENAI_CODEX_PROVIDER] = {
+      type: "api_key",
+      key: openAIApiKey,
+    };
+  }
+
+  return entries;
+}
+
+function buildOpenAICodexOAuthCredential(codexAuth: Record<string, unknown>): Record<string, unknown> | null {
+  const tokens = codexAuth["tokens"];
+  if (typeof tokens !== "object" || tokens === null) {
+    return null;
+  }
+  const tokenValues = tokens as Record<string, unknown>;
+
+  const access = normalizeString(tokenValues["access_token"]);
+  const refresh = normalizeString(tokenValues["refresh_token"]);
+  const accountId = normalizeString(tokenValues["account_id"]) ?? readAccountIdFromJwt(access);
+
+  if (!access || !refresh || !accountId) {
+    return null;
+  }
+
+  return {
+    type: "oauth",
+    access,
+    refresh,
+    expires: readJwtExpiry(access) ?? Date.now(),
+    accountId,
+  };
+}
+
+function readAccountIdFromJwt(token: string | null): string | null {
+  const authClaim = readJwtPayload(token)?.[CODEX_AUTH_CLAIM];
+  if (typeof authClaim !== "object" || authClaim === null) {
+    return null;
+  }
+  return normalizeString((authClaim as Record<string, unknown>)["chatgpt_account_id"]);
+}
+
+function readJwtExpiry(token: string | null): number | null {
+  const exp = readJwtPayload(token)?.["exp"];
+  return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : null;
+}
+
+function readJwtPayload(token: string | null): Record<string, unknown> | null {
+  if (!token) {
+    return null;
+  }
+
+  const parts = token.split(".");
+  if (parts.length !== 3) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf-8"));
+    return typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+function preparePiAgentDir(
+  baseDir: string | null,
+  authEntries: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+): string {
+  const baseAuthPath = resolveBasePiAgentAuthPath(env);
+  const codexAuthPath = resolveCodexAuthPath(env);
+  const cacheKey = [
+    baseDir ?? "<none>",
+    baseAuthPath ?? "<none>",
+    codexAuthPath ?? "<none>",
+    readPathSignature(baseDir),
+    readPathSignature(baseAuthPath),
+    readPathSignature(codexAuthPath),
+  ].join("|");
+  const cached = preparedPiAgentDirs.get(cacheKey);
+  if (cached && existsSync(cached)) {
+    return cached;
+  }
+
+  const preparedDir = mkdtempSync(join(tmpdir(), "agent-maestro-pi-agent-"));
+
+  if (baseDir) {
+    for (const entry of readdirSync(baseDir)) {
+      cpSync(join(baseDir, entry), join(preparedDir, entry), { recursive: true });
+    }
+  }
+
+  writeFileSync(join(preparedDir, PI_AUTH_FILENAME), JSON.stringify(authEntries, null, 2), {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+
+  preparedPiAgentDirs.set(cacheKey, preparedDir);
+  return preparedDir;
+}
+
+function readPathSignature(path: string | null): string {
+  if (!path || !existsSync(path)) {
+    return "missing";
+  }
+
+  const stats = statSync(path);
+  return `${stats.size}:${stats.mtimeMs}`;
 }

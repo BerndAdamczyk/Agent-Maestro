@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   getForwardedProviderEnv,
+  hasPiProviderCredentials,
   resolvePiAgentDir,
   resolvePiCommand,
 } from "../dist/src/pi-runtime-support.js";
@@ -28,7 +29,120 @@ test("getForwardedProviderEnv keeps supported credentials only", () => {
   );
 });
 
+test("getForwardedProviderEnv reuses the API key stored by codex login", () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "agent-maestro-codex-home-"));
+  const codexDir = join(homeDir, ".codex");
+  mkdirSync(codexDir, { recursive: true });
+  writeFileSync(join(codexDir, "auth.json"), JSON.stringify({
+    auth_mode: "api_key",
+    OPENAI_API_KEY: "sk-from-codex-login",
+  }, null, 2));
+
+  assert.deepEqual(
+    getForwardedProviderEnv({ HOME: homeDir }),
+    {
+      OPENAI_API_KEY: "sk-from-codex-login",
+    },
+  );
+});
+
 test("resolvePiAgentDir honors PI_CODING_AGENT_DIR when it exists", () => {
   const agentDir = mkdtempSync(join(tmpdir(), "agent-maestro-pi-"));
   assert.equal(resolvePiAgentDir({ PI_CODING_AGENT_DIR: agentDir }), agentDir);
 });
+
+test("hasPiProviderCredentials recognizes ChatGPT codex login for openai-codex", () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "agent-maestro-codex-home-"));
+  const codexDir = join(homeDir, ".codex");
+  mkdirSync(codexDir, { recursive: true });
+
+  writeFileSync(join(codexDir, "auth.json"), JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: {
+      access_token: makeJwt({
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        "https://api.openai.com/auth": {
+          chatgpt_account_id: "acct-from-jwt",
+        },
+      }),
+      refresh_token: "refresh-token",
+      account_id: "acct-from-auth-file",
+    },
+  }, null, 2));
+
+  assert.equal(hasPiProviderCredentials("openai-codex", { HOME: homeDir }), true);
+});
+
+test("resolvePiAgentDir prepares a merged Pi auth dir from codex login", () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "agent-maestro-codex-home-"));
+  const piAgentDir = join(homeDir, ".pi", "agent");
+  const codexDir = join(homeDir, ".codex");
+  mkdirSync(piAgentDir, { recursive: true });
+  mkdirSync(codexDir, { recursive: true });
+
+  writeFileSync(join(piAgentDir, "auth.json"), JSON.stringify({
+    anthropic: {
+      type: "oauth",
+      access: "anthropic-access",
+      refresh: "anthropic-refresh",
+      expires: 1234,
+    },
+  }, null, 2));
+  writeFileSync(join(piAgentDir, "settings.json"), JSON.stringify({ theme: "test" }, null, 2));
+
+  const expSeconds = Math.floor(Date.now() / 1000) + 3600;
+  const accessToken = makeJwt({
+    exp: expSeconds,
+    "https://api.openai.com/auth": {
+      chatgpt_account_id: "acct-from-jwt",
+    },
+  });
+  writeFileSync(join(codexDir, "auth.json"), JSON.stringify({
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: "",
+    tokens: {
+      access_token: accessToken,
+      refresh_token: "refresh-token",
+      account_id: "acct-from-auth-file",
+    },
+  }, null, 2));
+
+  const preparedDir = resolvePiAgentDir({ HOME: homeDir });
+  assert.ok(preparedDir);
+  assert.notEqual(preparedDir, piAgentDir);
+  assert.equal(readFileSync(join(preparedDir, "settings.json"), "utf8"), JSON.stringify({ theme: "test" }, null, 2));
+
+  const mergedAuth = JSON.parse(readFileSync(join(preparedDir, "auth.json"), "utf8"));
+  assert.deepEqual(mergedAuth.anthropic, {
+    type: "oauth",
+    access: "anthropic-access",
+    refresh: "anthropic-refresh",
+    expires: 1234,
+  });
+  assert.deepEqual(mergedAuth["openai-codex"], {
+    type: "oauth",
+    access: accessToken,
+    refresh: "refresh-token",
+    expires: expSeconds * 1000,
+    accountId: "acct-from-auth-file",
+  });
+});
+
+test("hasPiProviderCredentials recognizes the API key stored by codex login", () => {
+  const homeDir = mkdtempSync(join(tmpdir(), "agent-maestro-codex-home-"));
+  const codexDir = join(homeDir, ".codex");
+  mkdirSync(codexDir, { recursive: true });
+
+  writeFileSync(join(codexDir, "auth.json"), JSON.stringify({
+    auth_mode: "api_key",
+    OPENAI_API_KEY: "sk-from-codex-login",
+  }, null, 2));
+
+  assert.equal(hasPiProviderCredentials("openai", { HOME: homeDir }), true);
+});
+
+function makeJwt(payload) {
+  const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  return `${header}.${body}.signature`;
+}

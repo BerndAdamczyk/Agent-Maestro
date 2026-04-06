@@ -56,14 +56,14 @@ teams:
 
 model_tier_policy:
   curator:
-    primary: "anthropic/claude-opus-4-6"
-    fallback: "google/gemini-2.5-pro"
+    primary: "openai-codex/gpt-5.4"
+    fallback: "openai-codex/gpt-5.4-mini"
   lead:
-    primary: "anthropic/claude-opus-4-6"
-    fallback: "google/gemini-2.5-pro"
+    primary: "openai-codex/gpt-5.4"
+    fallback: "openai-codex/gpt-5.4-mini"
   worker:
-    primary: "anthropic/claude-sonnet-4-6"
-    fallback: "google/gemini-2.5-flash"
+    primary: "openai-codex/gpt-5.4-mini"
+    fallback: "openai-codex/gpt-5.4"
 
 memory:
   session_retention_days: 7

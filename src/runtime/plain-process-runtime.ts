@@ -62,6 +62,7 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
       taskId: params.taskId,
       launchedAt: startedAt,
     };
+    const piAgentDir = resolvePiAgentDir();
 
     const state: ProcessState = {
       child: null,
@@ -76,7 +77,7 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
         ...getForwardedProviderEnv(),
         ...params.env,
         PI_BIN: resolvePiCommand(),
-        ...(resolvePiAgentDir() ? { PI_CODING_AGENT_DIR: resolvePiAgentDir()! } : {}),
+        ...(piAgentDir ? { PI_CODING_AGENT_DIR: piAgentDir } : {}),
         MAESTRO_POLICY_PATH: params.policyManifestPath,
       },
       turnNumber: 0,
