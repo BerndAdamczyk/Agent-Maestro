@@ -54,7 +54,11 @@ export class MonitorEngine {
 
     if (!result.runtimeAlive) {
       // Agent process is gone
-      this.logger.logEntry("Monitor", `Agent ${worker.agentName} (${worker.taskId}) runtime dead`);
+      this.logger.logEntry("Monitor", `Agent ${worker.agentName} (${worker.taskId}) runtime dead`, {
+        level: "warn",
+        taskId: worker.taskId,
+        correlationId: worker.correlationId,
+      });
       return result;
     }
 
@@ -87,7 +91,12 @@ export class MonitorEngine {
     if (result.isStalled) {
       this.logger.logEntry(
         "Monitor",
-        `Agent ${worker.agentName} (${worker.taskId}) stalled: no output for ${Math.round(secondsSinceOutput)}s`
+        `Agent ${worker.agentName} (${worker.taskId}) stalled: no output for ${Math.round(secondsSinceOutput)}s`,
+        {
+          level: "warn",
+          taskId: worker.taskId,
+          correlationId: worker.correlationId,
+        }
       );
     }
 

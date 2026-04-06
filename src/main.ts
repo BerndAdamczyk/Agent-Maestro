@@ -11,6 +11,7 @@
  */
 
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { v4 as uuid } from "uuid";
 import { loadConfig, AgentResolver } from "./config.js";
@@ -28,12 +29,13 @@ import type { SystemConfig, SessionState, ActiveWorker } from "./types.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { TmuxAgentRuntime } from "./runtime/tmux-agent-runtime.js";
 import { DryRunAgentRuntime } from "./runtime/dry-run-runtime.js";
+import { PlainProcessAgentRuntime } from "./runtime/plain-process-runtime.js";
 
 // ── CLI Args ─────────────────────────────────────────────────────────
 
 const isResume = process.argv.includes("--resume");
 const rootDir = process.env["MAESTRO_ROOT"] || process.cwd();
-const runtimeMode = (process.env["MAESTRO_RUNTIME"] || "tmux").toLowerCase();
+const runtimeMode = (process.env["MAESTRO_RUNTIME"] || "auto").toLowerCase();
 
 // ── Bootstrap ────────────────────────────────────────────────────────
 
@@ -118,8 +120,8 @@ async function main() {
   });
   await webServer.start(3000, "127.0.0.1");
 
-  logger.logEntry("Maestro", "Session started");
-  logger.logEntry("Maestro", `Goal: ${goal.split("\n").slice(2, 3).join("").trim()}`);
+  logger.logEntry("Maestro", "Session started", { level: "info" });
+  logger.logEntry("Maestro", `Goal: ${goal.split("\n").slice(2, 3).join("").trim()}`, { level: "info" });
   statusManager.initialize();
 
   // Ensure agent memory directories
@@ -130,7 +132,7 @@ async function main() {
   // ── Session Resume ───────────────────────────────────────────────
 
   if (isResume) {
-    logger.logEntry("Maestro", "Resuming session from workspace state");
+    logger.logEntry("Maestro", "Resuming session from workspace state", { level: "info" });
     const tasks = taskManager.getAllTasks();
     const maxWave = Math.max(0, ...tasks.map(t => t.wave));
     const completedWaves = new Set<number>();
@@ -181,12 +183,17 @@ async function main() {
 
         if (validation.status === "invalid") {
           taskManager.updateStatus(result.taskId, "in_progress");
+          const worker = delegationEngine.getActiveWorker(result.taskId);
           logger.logEntry(
             "Validation",
-            `Rejected handoff for ${result.taskId}: ${validation.issues.join("; ")}`
+            `Rejected handoff for ${result.taskId}: ${validation.issues.join("; ")}`,
+            {
+              level: "warn",
+              taskId: result.taskId,
+              correlationId: worker?.correlationId ?? taskManager.readTask(result.taskId)?.correlationId ?? null,
+            }
           );
 
-          const worker = delegationEngine.getActiveWorker(result.taskId);
           if (worker) {
             runtime.resume(worker.runtimeHandle, {
               phase: "phase_2_execute",
@@ -223,7 +230,12 @@ async function main() {
         result.taskStatus !== "plan_approved" &&
         result.taskStatus !== "plan_revision_needed"
       ) {
-        logger.logEntry("Monitor", `Agent crashed: ${result.agentName} (${result.taskId})`);
+        const task = taskManager.readTask(result.taskId);
+        logger.logEntry("Monitor", `Agent crashed: ${result.agentName} (${result.taskId})`, {
+          level: "error",
+          taskId: result.taskId,
+          correlationId: task?.correlationId ?? null,
+        });
         taskManager.updateStatus(result.taskId, "failed");
         delegationEngine.completeWorker(result.taskId);
       }
@@ -236,7 +248,7 @@ async function main() {
     const queued = delegationEngine.processQueue();
     if (queued) {
       delegationEngine.delegate(queued).catch(err => {
-        logger.logEntry("Maestro", `Queued delegation failed: ${err.message}`);
+        logger.logEntry("Maestro", `Queued delegation failed: ${err.message}`, { level: "error" });
       });
     }
   }, 5000);
@@ -246,7 +258,7 @@ async function main() {
     console.log("\nShutting down...");
     clearInterval(monitorInterval);
     session.status = "completed";
-    logger.logEntry("Maestro", "Session ended");
+    logger.logEntry("Maestro", "Session ended", { level: "info" });
     statusManager.refresh();
 
     // Final memory checkpoint
@@ -271,15 +283,36 @@ main().catch(err => {
 
 function createAgentRuntime(mode: string, config: SystemConfig): AgentRuntime {
   switch (mode) {
+    case "auto":
+      return hasTmuxBinary()
+        ? new TmuxAgentRuntime(new RuntimeManager(config.tmux_session, config.limits.max_panes))
+        : new PlainProcessAgentRuntime(config.limits.max_panes);
     case "dry-run":
     case "dryrun":
       return new DryRunAgentRuntime(config.limits.max_panes);
+    case "plain-process":
+    case "plain_process":
+    case "process":
+      return new PlainProcessAgentRuntime(config.limits.max_panes);
     case "tmux":
+      if (!hasTmuxBinary()) {
+        console.warn("tmux not available, falling back to plain-process runtime");
+        return new PlainProcessAgentRuntime(config.limits.max_panes);
+      }
       return new TmuxAgentRuntime(
         new RuntimeManager(config.tmux_session, config.limits.max_panes),
       );
     default:
-      throw new Error(`Unsupported runtime '${mode}'. Expected 'tmux' or 'dry-run'.`);
+      throw new Error(`Unsupported runtime '${mode}'. Expected 'auto', 'tmux', 'plain-process', or 'dry-run'.`);
+  }
+}
+
+function hasTmuxBinary(): boolean {
+  try {
+    execFileSync("tmux", ["-V"], { stdio: "pipe" });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -299,7 +332,10 @@ function consumeRuntimeControlSignals(
         message: "The proposed approach is approved. Proceed to implementation and complete the task.",
       });
       taskManager.updateStatus(taskId, "in_progress");
-      logger.logEntry("Monitor", `Consumed plan_approved for ${taskId}; resumed ${worker.agentName} in phase_2_execute`);
+      logger.logEntry("Monitor", `Consumed plan_approved for ${taskId}; resumed ${worker.agentName} in phase_2_execute`, {
+        taskId,
+        correlationId: task.correlationId,
+      });
       continue;
     }
 
@@ -313,7 +349,11 @@ function consumeRuntimeControlSignals(
         ].join("\n"),
       });
       taskManager.updateStatus(taskId, "in_progress");
-      logger.logEntry("Monitor", `Consumed plan_revision_needed for ${taskId}; resumed ${worker.agentName} in phase_1_plan`);
+      logger.logEntry("Monitor", `Consumed plan_revision_needed for ${taskId}; resumed ${worker.agentName} in phase_1_plan`, {
+        level: "warn",
+        taskId,
+        correlationId: task.correlationId,
+      });
     }
   }
 }

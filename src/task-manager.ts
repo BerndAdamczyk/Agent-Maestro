@@ -4,6 +4,7 @@
  */
 
 import { readFileSync, writeFileSync, existsSync, readdirSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type {
   ParsedTask,
@@ -60,6 +61,7 @@ export class TaskManager {
 
     const task: ParsedTask = {
       id,
+      correlationId: randomUUID(),
       title: params.title,
       description: params.description,
       assignedTo: params.assignedTo,
@@ -171,6 +173,7 @@ export class TaskManager {
       `# ${task.id}: ${task.title}`,
       "",
       `**Status:** ${task.status}`,
+      `**Correlation ID:** ${task.correlationId}`,
       `**Assigned To:** ${task.assignedTo}`,
       `**Wave:** ${task.wave}`,
       `**Phase:** ${task.phase}`,
@@ -284,6 +287,7 @@ export class TaskManager {
 
     return {
       id: taskId,
+      correlationId: get("Correlation ID") || taskId,
       title: titleMatch?.[1] ?? "",
       description: getSection("Description"),
       assignedTo: get("Assigned To"),

@@ -80,7 +80,11 @@ export class DelegationEngine {
 
     // Spawn budget check
     if (!this.runtime.hasCapacity()) {
-      this.logger.logEntry("Maestro", `Queuing delegation for '${params.agentName}' -- spawn budget full`);
+      this.logger.logEntry("Maestro", `Queuing delegation for '${params.agentName}' -- spawn budget full`, {
+        level: "warn",
+        taskId: params.taskId || null,
+        correlationId: null,
+      });
       this.delegationQueue.push({ params, queuedAt: new Date() });
       throw new Error("Spawn budget exhausted, delegation queued");
     }
@@ -137,6 +141,7 @@ export class DelegationEngine {
       runtimeType: runtimeHandle.runtimeType,
       runtimeHandle,
       taskId: task.id,
+      correlationId: task.correlationId,
       role: this.agentResolver.getAgentRole(params.agentName),
       hierarchyLevel: params.delegationDepth + 1,
       startedAt: now,
@@ -148,7 +153,11 @@ export class DelegationEngine {
 
     this.logger.logEntry(
       "Maestro",
-      `Delegated ${task.id} "${params.taskTitle}" to ${params.agentName} (${runtimeHandle.runtimeType}: ${runtimeHandle.id}, wave: ${params.wave})`
+      `Delegated ${task.id} "${params.taskTitle}" to ${params.agentName} (${runtimeHandle.runtimeType}: ${runtimeHandle.id}, wave: ${params.wave})`,
+      {
+        taskId: task.id,
+        correlationId: task.correlationId,
+      }
     );
 
     // Update task status
@@ -178,7 +187,10 @@ export class DelegationEngine {
     this.runtime.destroy(worker.runtimeHandle);
     this.activeWorkers.delete(taskId);
 
-    this.logger.logEntry("Maestro", `Worker completed: ${taskId} (${worker.agentName})`);
+    this.logger.logEntry("Maestro", `Worker completed: ${taskId} (${worker.agentName})`, {
+      taskId,
+      correlationId: worker.correlationId,
+    });
   }
 
   private getAllowedTools(agent: AgentDefinition): string[] {

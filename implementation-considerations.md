@@ -12,8 +12,8 @@ Last updated: 2026-04-06
 | P1 tmux integration strategy | Implemented | Keep `src/runtime-manager.ts` as the low-level tmux primitive layer; orchestration code now depends on `AgentRuntime` instead of the tmux manager directly. | Runtime |
 | P1 plan-gate runtime state machine | Implemented | The orchestrator now treats `plan_ready` as a paused turn, consumes `plan_approved` / `plan_revision_needed` as control-plane signals, and resumes workers via `AgentRuntime.resume()` in the correct phase. | Runtime / Workflow |
 | P1 handoff validation | Implemented | Handoff reports now carry validation metadata in task files and pass a schema-plus-semantic validation step before completion is accepted; invalid handoffs are resumed back into execution for revision. | Validation |
-| P2 enhanced logger | Pending | If JSONL sidecar is added, keep `src/security.ts` as the single redaction hook instead of duplicating masking logic in multiple sinks. | Observability |
-| P2 no-tmux degradation | Pending | `DryRunAgentRuntime` is for control-plane testing only; the real non-tmux fallback should be a child-process runtime with output capture and compatible lifecycle semantics. | Runtime |
+| P2 enhanced logger | Implemented | Activity logging now carries `level`, `taskId`, and `correlationId`, with a redacted `workspace/log.jsonl` sidecar for machine-readable audit/recovery flows. | Observability |
+| P2 no-tmux degradation | Implemented | `PlainProcessAgentRuntime` now provides a `child_process.spawn` fallback with output capture and redacted per-agent log persistence when tmux is unavailable. | Runtime |
 
 ## Follow-up notes
 

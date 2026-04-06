@@ -208,6 +208,7 @@ export interface ActiveWorker {
   runtimeType: RuntimeType;
   runtimeHandle: RuntimeHandle;
   taskId: string;
+  correlationId: string;
   role: "maestro" | "lead" | "worker";
   hierarchyLevel: number;
   startedAt: Date;
@@ -231,6 +232,7 @@ export type TaskPhase = "phase_1_plan" | "phase_2_execute" | "none";
 
 export interface ParsedTask {
   id: string;
+  correlationId: string;
   title: string;
   description: string;
   assignedTo: string;
@@ -286,8 +288,13 @@ export interface FileChangeEvent {
 
 // ── Log Entry ────────────────────────────────────────────────────────
 
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
 export interface LogEntry {
   timestamp: string;
+  level: LogLevel;
+  taskId: string | null;
+  correlationId: string | null;
   agent: string;
   message: string;
 }

@@ -11,10 +11,12 @@ import type {
 import type { AgentRuntime } from "./agent-runtime.js";
 import { RuntimeManager } from "../runtime-manager.js";
 import { sanitizeForShell } from "../utils.js";
+import { appendRuntimeObservation } from "./runtime-log.js";
 
 export class TmuxAgentRuntime implements AgentRuntime {
   private manager: RuntimeManager;
   private results = new Map<string, RuntimeResult>();
+  private workspaceRoots = new Map<string, string>();
 
   constructor(manager: RuntimeManager) {
     this.manager = manager;
@@ -59,7 +61,13 @@ export class TmuxAgentRuntime implements AgentRuntime {
         failoverCount: 0,
       },
     });
+    this.workspaceRoots.set(paneId, params.workspaceRoot);
 
+    appendRuntimeObservation(
+      params.workspaceRoot,
+      params.agentName,
+      `[tmux runtime] launched task=${params.taskId} timeout_ms=${params.timeoutMs}`,
+    );
     this.manager.sendKeys(paneId, this.buildLaunchCommand(params));
     return handle;
   }
@@ -68,6 +76,7 @@ export class TmuxAgentRuntime implements AgentRuntime {
     if (!this.isAlive(handle)) return;
 
     const message = sanitizeForShell(params.message).trim() || "Resume requested";
+    this.logObservation(handle, `[tmux runtime] resume phase=${params.phase}: ${message}`);
     this.manager.sendKeys(
       handle.id,
       `printf '%s\\n' ${shellQuote(`[runtime resume] phase=${params.phase}`)} && printf '%s\\n' ${shellQuote(message)}`,
@@ -89,6 +98,7 @@ export class TmuxAgentRuntime implements AgentRuntime {
     }
 
     if (this.isAlive(handle)) {
+      this.logObservation(handle, `[tmux runtime] interrupt: ${reason}`);
       this.manager.sendKeys(
         handle.id,
         `printf '%s\\n' ${shellQuote(`[runtime interrupt] ${sanitizeForShell(reason)}`)}`,
@@ -102,7 +112,9 @@ export class TmuxAgentRuntime implements AgentRuntime {
       this.results.set(handle.id, finalizeResult(result, "interrupted"));
     }
 
+    this.logObservation(handle, "[tmux runtime] destroy");
     this.manager.destroyPane(handle.id);
+    this.workspaceRoots.delete(handle.id);
   }
 
   getResult(handle: RuntimeHandle): RuntimeResult | null {
@@ -120,6 +132,12 @@ export class TmuxAgentRuntime implements AgentRuntime {
       `printf '%s\\n' ${shellQuote(`[tmux runtime] allowed_tools=${toolSummary}`)}`,
       `printf '%s\\n' ${shellQuote("[tmux runtime] backend placeholder: integrate Pi runtime here")}`,
     ].join(" && ");
+  }
+
+  private logObservation(handle: RuntimeHandle, message: string): void {
+    const workspaceRoot = this.workspaceRoots.get(handle.id);
+    if (!workspaceRoot) return;
+    appendRuntimeObservation(workspaceRoot, handle.agentName, message);
   }
 }
 
