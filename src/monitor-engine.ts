@@ -10,6 +10,7 @@
  *  4. Stall detection
  */
 
+import { statSync } from "node:fs";
 import type { ActiveWorker, MonitorResult, TaskStatus } from "./types.js";
 import type { TaskManager } from "./task-manager.js";
 import type { Logger } from "./logger.js";
@@ -21,6 +22,7 @@ export class MonitorEngine {
   private logger: Logger;
   private stallTimeout: number;           // seconds
   private lastOutputCache = new Map<string, string>();  // taskId -> last captured output
+  private lastActivityMarkerCache = new Map<string, number>(); // taskId -> latest observed artifact mtime
 
   constructor(
     runtime: AgentRuntime,
@@ -72,8 +74,20 @@ export class MonitorEngine {
     result.lastOutput = currentOutput;
 
     const previousOutput = this.lastOutputCache.get(worker.taskId) ?? "";
-    result.hasNewOutput = currentOutput !== previousOutput;
     this.lastOutputCache.set(worker.taskId, currentOutput);
+
+    let hasNewActivity = currentOutput !== previousOutput;
+    const activityMarker = this.getLatestActivityMarker(worker);
+    const previousActivityMarker = this.lastActivityMarkerCache.get(worker.taskId);
+
+    if (activityMarker !== null) {
+      this.lastActivityMarkerCache.set(worker.taskId, activityMarker);
+      if (previousActivityMarker !== undefined && activityMarker > previousActivityMarker) {
+        hasNewActivity = true;
+      }
+    }
+
+    result.hasNewOutput = hasNewActivity;
 
     if (result.hasNewOutput) {
       worker.lastOutputAt = new Date();
@@ -159,5 +173,30 @@ export class MonitorEngine {
 
   clearCache(taskId: string): void {
     this.lastOutputCache.delete(taskId);
+    this.lastActivityMarkerCache.delete(taskId);
+  }
+
+  private getLatestActivityMarker(worker: ActiveWorker): number | null {
+    const runtimeResult = this.runtime.getResult?.(worker.runtimeHandle);
+    if (!runtimeResult) return null;
+
+    let latestMarker: number | null = null;
+
+    for (const artifact of runtimeResult.artifacts) {
+      if (artifact.type !== "pi-session" && artifact.type !== "task-file") {
+        continue;
+      }
+
+      try {
+        const stats = statSync(artifact.path);
+        latestMarker = latestMarker === null
+          ? stats.mtimeMs
+          : Math.max(latestMarker, stats.mtimeMs);
+      } catch {
+        // Ignore missing/transient files; stdout-based monitoring still applies.
+      }
+    }
+
+    return latestMarker;
   }
 }

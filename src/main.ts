@@ -261,7 +261,11 @@ async function main() {
         appendSessionEvent(memory, result.taskId, "No new output detected; worker moved to stalled and received a nudge.");
         runtime.resume(worker.runtimeHandle, {
           phase: task.phase,
-          message: `No new output was detected for ${config.limits.stall_timeout_seconds}s. Provide a progress update or continue the task immediately.`,
+          message: [
+            `No new output was detected for ${config.limits.stall_timeout_seconds}s.`,
+            "Re-read the task file before making further edits because Maestro may have updated its status to stalled.",
+            "Then provide a progress update or continue the task immediately.",
+          ].join("\n"),
         });
         logger.logEntry("Monitor", `Sent stall nudge to ${result.taskId}`, {
           level: "warn",
@@ -291,6 +295,13 @@ async function main() {
               phase: "phase_2_execute",
               message: [
                 "Your handoff report was rejected by the lead-level validation gate.",
+                "Re-read the task file before editing it again.",
+                "Update the task file with these exact sections before setting status to complete:",
+                "## Handoff Report",
+                "### Changes Made",
+                "### Patterns Followed",
+                "### Unresolved Concerns",
+                "### Suggested Follow-ups",
                 ...validation.issues.map(issue => `- ${issue}`),
                 "Revise the implementation or handoff report, then set the task status to complete again.",
               ].join("\n"),

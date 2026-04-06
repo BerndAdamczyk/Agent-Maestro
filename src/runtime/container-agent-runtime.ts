@@ -33,6 +33,7 @@ interface ContainerState {
   piAgentDir: string | null;
   turnNumber: number;
   containerName: string | null;
+  pendingResume: AgentRuntimeResumeParams | null;
 }
 
 export class ContainerAgentRuntime implements AgentRuntime {
@@ -106,6 +107,7 @@ export class ContainerAgentRuntime implements AgentRuntime {
       piAgentDir: hostPiAgentDir,
       turnNumber: 0,
       containerName: null,
+      pendingResume: null,
       result: {
         exitStatus: "running",
         handoffReportPath: params.taskFilePath,
@@ -143,7 +145,12 @@ export class ContainerAgentRuntime implements AgentRuntime {
 
   resume(handle: RuntimeHandle, params: AgentRuntimeResumeParams): void {
     const state = this.containers.get(handle.id);
-    if (!state || this.isAlive(handle)) return;
+    if (!state) return;
+    if (this.isAlive(handle)) {
+      state.pendingResume = params;
+      return;
+    }
+    state.pendingResume = null;
     this.startTurn(handle, state, params.phase, params.message);
   }
 
@@ -163,6 +170,7 @@ export class ContainerAgentRuntime implements AgentRuntime {
     const state = this.containers.get(handle.id);
     if (!state) return;
 
+    state.pendingResume = null;
     appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[container runtime] interrupt: ${reason}`);
     if (state.containerName) {
       try {
@@ -179,6 +187,7 @@ export class ContainerAgentRuntime implements AgentRuntime {
     const state = this.containers.get(handle.id);
     if (!state) return;
 
+    state.pendingResume = null;
     if (state.containerName) {
       try {
         execFileSync("docker", ["rm", "-f", state.containerName], { stdio: "ignore" });
@@ -208,11 +217,14 @@ export class ContainerAgentRuntime implements AgentRuntime {
     message: string,
   ): void {
     state.turnNumber += 1;
+    state.pendingResume = null;
     state.result = {
       ...state.result,
       exitStatus: "running",
       metrics: {
         ...state.result.metrics,
+        finishedAt: undefined,
+        durationMs: undefined,
         retryCount: state.turnNumber - 1,
       },
     };
@@ -290,6 +302,8 @@ export class ContainerAgentRuntime implements AgentRuntime {
       state.containerName = null;
       state.result = finalizeRuntimeResult(state.result, code === 0 ? "completed" : "failed");
       this.results.set(handle.id, state.result);
+
+      this.runPendingResume(handle, state);
     });
 
     appendRuntimeObservation(
@@ -297,6 +311,15 @@ export class ContainerAgentRuntime implements AgentRuntime {
       handle.agentName,
       `[container runtime] turn=${state.turnNumber} phase=${phase} model=${state.model} tools=${state.allowedTools.join(",") || "none"} image=${this.imageName}`,
     );
+  }
+
+  private runPendingResume(handle: RuntimeHandle, state: ContainerState): boolean {
+    if (!state.pendingResume) return false;
+
+    const pending = state.pendingResume;
+    state.pendingResume = null;
+    this.startTurn(handle, state, pending.phase, pending.message);
+    return true;
   }
 }
 
@@ -370,6 +393,7 @@ function launchMessage(params: AgentRuntimeLaunchParams): string {
   return [
     `Start task ${params.taskId} as ${params.agentName}.`,
     `Current phase: ${params.phase}.`,
+    "The task is not complete until the task file includes a valid handoff report with all required sections.",
     "Read the task file first, then execute only the work required for this turn.",
   ].join("\n");
 }

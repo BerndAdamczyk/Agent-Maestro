@@ -29,6 +29,7 @@ interface ProcessState {
   allowedTools: string[];
   env: Record<string, string>;
   turnNumber: number;
+  pendingResume: AgentRuntimeResumeParams | null;
 }
 
 export class PlainProcessAgentRuntime implements AgentRuntime {
@@ -81,6 +82,7 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
         MAESTRO_POLICY_PATH: params.policyManifestPath,
       },
       turnNumber: 0,
+      pendingResume: null,
       result: {
         exitStatus: "running",
         handoffReportPath: params.taskFilePath,
@@ -118,7 +120,12 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
 
   resume(handle: RuntimeHandle, params: AgentRuntimeResumeParams): void {
     const state = this.processes.get(handle.id);
-    if (!state || this.isAlive(handle)) return;
+    if (!state) return;
+    if (this.isAlive(handle)) {
+      state.pendingResume = params;
+      return;
+    }
+    state.pendingResume = null;
     this.startTurn(handle, state, params.phase, params.message);
   }
 
@@ -138,6 +145,7 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
     const state = this.processes.get(handle.id);
     if (!state) return;
 
+    state.pendingResume = null;
     appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[process runtime] interrupt: ${reason}`);
     if (state.child && this.isAlive(handle)) {
       state.child.kill("SIGINT");
@@ -150,6 +158,7 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
     const state = this.processes.get(handle.id);
     if (!state) return;
 
+    state.pendingResume = null;
     if (state.child && this.isAlive(handle)) {
       state.child.kill("SIGTERM");
     }
@@ -172,11 +181,14 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
     message: string,
   ): void {
     state.turnNumber += 1;
+    state.pendingResume = null;
     state.result = {
       ...state.result,
       exitStatus: "running",
       metrics: {
         ...state.result.metrics,
+        finishedAt: undefined,
+        durationMs: undefined,
         retryCount: state.turnNumber - 1,
       },
     };
@@ -237,6 +249,8 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
       state.child = null;
       state.result = finalizeRuntimeResult(state.result, code === 0 ? "completed" : "failed");
       this.results.set(handle.id, state.result);
+
+      this.runPendingResume(handle, state);
     });
 
     appendRuntimeObservation(
@@ -245,12 +259,22 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
       `[process runtime] turn=${state.turnNumber} phase=${phase} model=${state.model} tools=${state.allowedTools.join(",") || "none"}`,
     );
   }
+
+  private runPendingResume(handle: RuntimeHandle, state: ProcessState): boolean {
+    if (!state.pendingResume) return false;
+
+    const pending = state.pendingResume;
+    state.pendingResume = null;
+    this.startTurn(handle, state, pending.phase, pending.message);
+    return true;
+  }
 }
 
 function launchMessage(params: AgentRuntimeLaunchParams): string {
   return [
     `Start task ${params.taskId} as ${params.agentName}.`,
     `Current phase: ${params.phase}.`,
+    "The task is not complete until the task file includes a valid handoff report with all required sections.",
     "Read the task file first, then execute only the work required for this turn.",
   ].join("\n");
 }

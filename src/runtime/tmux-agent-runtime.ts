@@ -25,6 +25,7 @@ interface TmuxState {
   env: Record<string, string>;
   turnNumber: number;
   currentTurnToken: string | null;
+  pendingResume: AgentRuntimeResumeParams | null;
   result: RuntimeResult;
 }
 
@@ -76,6 +77,7 @@ export class TmuxAgentRuntime implements AgentRuntime {
       },
       turnNumber: 0,
       currentTurnToken: null,
+      pendingResume: null,
       result: {
         exitStatus: "running",
         handoffReportPath: params.taskFilePath,
@@ -113,7 +115,12 @@ export class TmuxAgentRuntime implements AgentRuntime {
 
   resume(handle: RuntimeHandle, params: AgentRuntimeResumeParams): void {
     const state = this.states.get(handle.id);
-    if (!state || this.isAlive(handle)) return;
+    if (!state) return;
+    if (this.isAlive(handle)) {
+      state.pendingResume = params;
+      return;
+    }
+    state.pendingResume = null;
     this.startTurn(handle, state, params.phase, params.message);
   }
 
@@ -123,7 +130,11 @@ export class TmuxAgentRuntime implements AgentRuntime {
     if (!this.manager.isAlive(handle.id)) return false;
     if (!state.currentTurnToken) return false;
     const output = this.manager.capturePane(handle.id, 200);
-    return !output.includes(`__MAESTRO_TURN_END__:${state.currentTurnToken}:`);
+    if (!output.includes(`__MAESTRO_TURN_END__:${state.currentTurnToken}:`)) {
+      return true;
+    }
+
+    return this.runPendingResume(handle, state);
   }
 
   getOutput(handle: RuntimeHandle, lines: number = 200): string {
@@ -134,6 +145,7 @@ export class TmuxAgentRuntime implements AgentRuntime {
     const state = this.states.get(handle.id);
     if (!state) return;
 
+    state.pendingResume = null;
     appendRuntimeObservation(state.workspaceRoot, handle.agentName, `[tmux runtime] interrupt: ${reason}`);
     this.manager.sendInterrupt(handle.id);
     state.result = finalizeRuntimeResult(state.result, "interrupted");
@@ -144,6 +156,7 @@ export class TmuxAgentRuntime implements AgentRuntime {
     const state = this.states.get(handle.id);
     if (!state) return;
 
+    state.pendingResume = null;
     if (state.result.exitStatus === "running") {
       state.result = finalizeRuntimeResult(state.result, "interrupted");
       this.results.set(handle.id, state.result);
@@ -165,12 +178,15 @@ export class TmuxAgentRuntime implements AgentRuntime {
     message: string,
   ): void {
     state.turnNumber += 1;
+    state.pendingResume = null;
     state.currentTurnToken = `${handle.taskId}-${state.turnNumber}-${Date.now()}`;
     state.result = {
       ...state.result,
       exitStatus: "running",
       metrics: {
         ...state.result.metrics,
+        finishedAt: undefined,
+        durationMs: undefined,
         retryCount: state.turnNumber - 1,
       },
     };
@@ -204,6 +220,15 @@ export class TmuxAgentRuntime implements AgentRuntime {
     );
     this.manager.sendKeys(handle.id, command);
   }
+
+  private runPendingResume(handle: RuntimeHandle, state: TmuxState): boolean {
+    if (!state.pendingResume) return false;
+
+    const pending = state.pendingResume;
+    state.pendingResume = null;
+    this.startTurn(handle, state, pending.phase, pending.message);
+    return true;
+  }
 }
 
 function shellQuote(value: string): string {
@@ -220,6 +245,7 @@ function launchMessage(params: AgentRuntimeLaunchParams): string {
   return [
     `Start task ${params.taskId} as ${params.agentName}.`,
     `Current phase: ${params.phase}.`,
+    "The task is not complete until the task file includes a valid handoff report with all required sections.",
     "Read the task file first, then execute only the work required for this turn.",
   ].join("\n");
 }
