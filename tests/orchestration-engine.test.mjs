@@ -107,3 +107,86 @@ test("run fails immediately when a wave already contains failed tasks", async ()
     /Wave 1 contains failed tasks: task-001/,
   );
 });
+
+test("reconciliation stops immediately when the fix task fails", async () => {
+  const logEntries = [];
+  const engine = new OrchestrationEngine({
+    rootDir: process.cwd(),
+    config: {
+      limits: {
+        wave_timeout_seconds: 1,
+        max_reconcile_retries: 1,
+      },
+      teams: [{ name: "Engineering", lead: { name: "Engineering Lead" } }],
+      maestro: { name: "Maestro" },
+    },
+    session: {
+      status: "active",
+      currentWave: 0,
+    },
+    agentResolver: {
+      getAgentHierarchyLevel: () => 1,
+    },
+    taskPlanService: {
+      hasAuthoritativePlan: () => true,
+      loadAuthoritativePlan: () => {
+        throw new Error("not used");
+      },
+      materialize: () => [],
+    },
+    taskPlanProvider: {
+      generate: () => {
+        throw new Error("not used");
+      },
+    },
+    taskManager: {
+      upsertTaskDefinition: () => {},
+      readTask: () => null,
+    },
+    delegationEngine: {
+      getActiveWorker: () => null,
+      delegate: async () => {
+        throw new Error("delegate should not be called");
+      },
+    },
+    monitorEngine: {},
+    reconcileEngine: {
+      run: () => ({
+        passed: false,
+        stdout: "failing stdout",
+        stderr: "failing stderr",
+      }),
+    },
+    statusManager: {
+      refresh: () => {},
+    },
+    logger: {
+      logEntry: (...args) => {
+        logEntries.push(args);
+      },
+    },
+    memory: {
+      gitCheckpoint: {
+        waveCheckpoint: () => {},
+      },
+    },
+    runtime: {
+      interrupt: () => {},
+      hasCapacity: () => true,
+    },
+  });
+
+  engine.waitForTasks = async () => ({
+    status: "failed",
+    failedTaskIds: ["task-reconcile-1-1"],
+  });
+
+  const reconciled = await engine.runReconciliationLoop(1, ["npm test"]);
+
+  assert.equal(reconciled, false);
+  assert.deepEqual(logEntries.at(-1), [
+    "Reconcile",
+    "Reconciliation attempt 1 ended with status 'failed'",
+    { level: "error", taskId: "task-reconcile-1-1" },
+  ]);
+});

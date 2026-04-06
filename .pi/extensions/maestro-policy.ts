@@ -191,8 +191,20 @@ function matchesGlob(value: string, pattern: string): boolean {
   const normalizedValue = value.replace(/\\/g, "/");
   const normalizedPattern = pattern.replace(/\\/g, "/");
   if (normalizedPattern === "**" || normalizedPattern === "**/*") return true;
+  if (matchesDirectoryRoot(normalizedValue, normalizedPattern)) return true;
   const regex = globToRegExp(normalizedPattern);
   return regex.test(normalizedValue);
+}
+
+function matchesDirectoryRoot(value: string, pattern: string): boolean {
+  for (const suffix of ["/**/*", "/**"]) {
+    if (!pattern.endsWith(suffix)) continue;
+    const root = pattern.slice(0, -suffix.length);
+    if (!root) return true;
+    return value === root || value.startsWith(`${root}/`);
+  }
+
+  return false;
 }
 
 function globToRegExp(pattern: string): RegExp {

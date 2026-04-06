@@ -11,13 +11,11 @@
  */
 
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
-import { readFileSync, existsSync, mkdirSync, writeFileSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { v4 as uuid } from "uuid";
 import { loadConfig, AgentResolver } from "./config.js";
 import { MemorySubsystem } from "./memory/index.js";
 import { PromptAssembler } from "./prompt-assembler.js";
-import { RuntimeManager } from "./runtime-manager.js";
 import { TaskManager } from "./task-manager.js";
 import { Logger } from "./logger.js";
 import { StatusManager } from "./status-manager.js";
@@ -27,6 +25,7 @@ import { ReconcileEngine } from "./reconcile-engine.js";
 import { OrchestrationEngine } from "./orchestration-engine.js";
 import { TaskPlanService } from "./task-plan.js";
 import { TaskPlanProvider } from "./task-plan-provider.js";
+import { createAgentRuntime, hasExistingSessionState } from "./startup.js";
 import { createWebServer } from "../web/server/index.js";
 import type {
   SystemConfig,
@@ -36,11 +35,6 @@ import type {
   DailyProtocolEntry,
 } from "./types.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
-import { TmuxAgentRuntime } from "./runtime/tmux-agent-runtime.js";
-import { DryRunAgentRuntime } from "./runtime/dry-run-runtime.js";
-import { PlainProcessAgentRuntime } from "./runtime/plain-process-runtime.js";
-import { ContainerAgentRuntime } from "./runtime/container-agent-runtime.js";
-import { HybridAgentRuntime } from "./runtime/hybrid-agent-runtime.js";
 
 // ── CLI Args ─────────────────────────────────────────────────────────
 
@@ -434,84 +428,6 @@ main().catch(err => {
   console.error("Fatal:", err);
   process.exit(1);
 });
-
-function createAgentRuntime(mode: string, config: SystemConfig): AgentRuntime {
-  const devMode = /^(?:1|true|yes)$/i.test(process.env["MAESTRO_DEV_MODE"] ?? "");
-  const processRuntime = new PlainProcessAgentRuntime(config.limits.max_panes);
-  const tmuxRuntime = hasTmuxBinary()
-    ? new TmuxAgentRuntime(new RuntimeManager(config.tmux_session, config.limits.max_panes))
-    : processRuntime;
-
-  switch (mode) {
-    case "auto":
-      return processRuntime;
-    case "dry-run":
-    case "dryrun":
-      return new DryRunAgentRuntime(config.limits.max_panes);
-    case "container":
-    case "hybrid":
-      if (!hasDockerRuntime()) {
-        console.warn("docker not available, falling back to plain-process runtime");
-        return processRuntime;
-      }
-      return new HybridAgentRuntime(
-        processRuntime,
-        new ContainerAgentRuntime(config.limits.max_panes),
-        config.limits.max_panes,
-      );
-    case "plain-process":
-    case "plain_process":
-    case "process":
-      return processRuntime;
-    case "tmux":
-      return tmuxRuntime;
-    default:
-      throw new Error(`Unsupported runtime '${mode}'. Expected 'auto', 'tmux', 'plain-process', 'container', or 'dry-run'.`);
-  }
-}
-
-function hasTmuxBinary(): boolean {
-  try {
-    execFileSync("tmux", ["-V"], { stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function hasDockerRuntime(): boolean {
-  try {
-    execFileSync("docker", ["info"], { stdio: "pipe" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function hasExistingSessionState(workspaceDir: string): boolean {
-  const fileCandidates = [
-    "plan.md",
-    "status.md",
-    "log.md",
-    "log.jsonl",
-  ];
-
-  if (fileCandidates.some(file => existsSync(join(workspaceDir, file)))) {
-    return true;
-  }
-
-  const dirCandidates = [
-    "tasks",
-    "runtime-policies",
-    "runtime-sessions",
-    "runtime-turns",
-  ];
-
-  return dirCandidates.some(dir => {
-    const dirPath = join(workspaceDir, dir);
-    return existsSync(dirPath) && readdirSync(dirPath).length > 0;
-  });
-}
 
 function consumeRuntimeControlSignals(
   workers: Map<string, ActiveWorker>,

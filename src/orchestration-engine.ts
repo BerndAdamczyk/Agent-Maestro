@@ -283,7 +283,12 @@ export class OrchestrationEngine {
       );
 
       const fixed = await this.waitForTasks([fixTaskId], this.config.limits.wave_timeout_seconds, `reconciliation attempt ${attempt}`);
-      if (!fixed) {
+      if (fixed.status !== "complete") {
+        this.logger.logEntry(
+          "Reconcile",
+          `Reconciliation attempt ${attempt} ended with status '${fixed.status}'`,
+          { level: "error", taskId: fixTaskId },
+        );
         return false;
       }
     }

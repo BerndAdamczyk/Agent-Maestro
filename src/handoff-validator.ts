@@ -7,7 +7,7 @@ import type { HandoffReport, HandoffValidation } from "./types.js";
 
 const SUBSTANTIVE_MIN_LENGTH = 12;
 const PLACEHOLDER_ONLY_RE = /^(?:n\/a|na|none|nothing|todo|tbd|unknown|-|\.\.\.)$/i;
-const EXPLICIT_NONE_RE = /^(?:none|none noted|no follow-?ups|no unresolved concerns|none at this time|n\/a)$/i;
+const EXPLICIT_NONE_RE = /^(?:none|none noted|no follow-?ups|no unresolved concerns|none at this time|n\/a)\.?$/i;
 
 export function validateHandoffReport(report: HandoffReport | null): HandoffValidation {
   const issues: string[] = [];
@@ -30,7 +30,12 @@ export function validateHandoffReport(report: HandoffReport | null): HandoffVali
     issues.push("Changes Made and Patterns Followed must not be identical.");
   }
 
-  if (unresolvedConcerns && suggestedFollowups && unresolvedConcerns === suggestedFollowups) {
+  if (
+    unresolvedConcerns &&
+    suggestedFollowups &&
+    unresolvedConcerns === suggestedFollowups &&
+    !isExplicitNone(unresolvedConcerns)
+  ) {
     issues.push("Unresolved Concerns and Suggested Follow-ups must not be identical.");
   }
 
@@ -66,7 +71,7 @@ function validateRequiredSection(
     return;
   }
 
-  if (allowExplicitNone && EXPLICIT_NONE_RE.test(value)) {
+  if (allowExplicitNone && isExplicitNone(value)) {
     return;
   }
 
@@ -85,4 +90,8 @@ function buildValidation(issues: string[]): HandoffValidation {
 
 function normalize(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+function isExplicitNone(value: string): boolean {
+  return EXPLICIT_NONE_RE.test(value);
 }
