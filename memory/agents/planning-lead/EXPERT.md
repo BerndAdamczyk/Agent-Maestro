@@ -9,6 +9,9 @@ schema_version: 1
 
 ## Architecture Patterns
 
+- **- Created `workspace/plans/todo-breakdown.json` with 7 atomic Todo-derived work items.** (confidence: 0.76)
+  _Source: task-001, 2026-04-06_
+
 - **- Analysed ./docs/Todo.md and extracted all 5 items with zero omissions.** (confidence: 0.76)
   _Source: task-001, 2026-04-06_
 

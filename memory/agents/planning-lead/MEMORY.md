@@ -8,6 +8,9 @@ schema_version: 1
 
 ## Patterns Learned
 
+- **- Applied the task-decomposition skill by splitting the composite Todo into single-outcome, verifiable items.** (confidence: 0.82)
+  _Source: task-001, 2026-04-06_
+
 - **- Task-decomposition skill: each TODO item is atomic and outcome-based with a single verifiable deliverable.** (confidence: 0.82)
   _Source: task-001, 2026-04-06_
 
@@ -18,6 +21,9 @@ schema_version: 1
 
 ## Mistakes to Avoid
 
+- **- The required preservation commit (`todo-001`) is outside normal downstream write scopes because it spans git history plus mixed `src/**`, `web/**`, `tests/**`, and repository-root changes.** (confidence: 0.78)
+  _Source: task-001, 2026-04-06_
+
 - **- Upsert authority mismatch: runtime rejected writes to workspace/roadmap.md despite it being declared in Write Scope. Downstream tasks referencing that path need adjustment.** (confidence: 0.78)
   _Source: task-001, 2026-04-06_
 
@@ -25,6 +31,9 @@ schema_version: 1
   _Source: task-001, 2026-04-06_
 
 ## Collaborations
+
+- **- Execute the preservation commit as a lead/Maestro-authorized step before delegating implementation work.** (confidence: 0.72)
+  _Source: task-001, 2026-04-06_
 
 - **- Maestro should investigate why upsert authority blocks writes to paths declared in the task write_scope.** (confidence: 0.72)
   _Source: task-001, 2026-04-06_
