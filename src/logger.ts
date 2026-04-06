@@ -9,6 +9,7 @@ import { appendFileSync, existsSync, writeFileSync, readFileSync } from "node:fs
 import { join } from "node:path";
 import type { LogEntry, LogLevel } from "./types.js";
 import { redactSecrets, stripUnsafeControlChars } from "./security.js";
+import { formatTimestamp } from "./utils.js";
 
 const LOG_HEADER = `# Activity Log
 
@@ -41,7 +42,7 @@ export class Logger {
   }
 
   logEntry(agent: string, message: string, context: LogContext = {}): void {
-    const ts = new Date().toISOString().replace("T", " ").slice(0, 19);
+    const ts = formatTimestamp();
     const entry: LogEntry = {
       timestamp: ts,
       level: context.level ?? "info",

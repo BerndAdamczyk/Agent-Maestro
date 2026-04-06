@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ParsedTask } from "./types.js";
 import type { TaskManager } from "./task-manager.js";
-import { atomicWrite } from "./utils.js";
+import { atomicWrite, formatTimestamp } from "./utils.js";
 
 export class StatusManager {
   private statusPath: string;
@@ -34,7 +34,7 @@ export class StatusManager {
     const lines: string[] = [
       "# Task Status",
       "",
-      `_Last updated: ${new Date().toISOString().replace("T", " ").slice(0, 19)}_`,
+      `_Last updated: ${formatTimestamp()}_`,
       "",
       "| Task | Title | Assigned To | Wave | Status | Phase |",
       "|------|-------|-------------|------|--------|-------|",

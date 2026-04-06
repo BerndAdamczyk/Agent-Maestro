@@ -27,6 +27,7 @@ import { TaskPlanService } from "./task-plan.js";
 import { TaskPlanProvider } from "./task-plan-provider.js";
 import { createAgentRuntime, hasExistingSessionState } from "./startup.js";
 import { createWebServer } from "../web/server/index.js";
+import { formatTimestamp } from "./utils.js";
 import type {
   SystemConfig,
   SessionState,
@@ -125,7 +126,7 @@ async function main() {
     sessionId: uuid(),
     tmuxSessionName: config.tmux_session,
     goal,
-    startedAt: new Date().toISOString(),
+    startedAt: formatTimestamp(),
     status: "active",
     currentWave: 0,
     activeWorkers: delegationEngine.getActiveWorkers(),

@@ -53,6 +53,11 @@ export class MonitorEngine {
     result.runtimeAlive = this.runtime.isAlive(worker.runtimeHandle);
 
     if (!result.runtimeAlive) {
+      const task = this.taskManager.readTask(worker.taskId);
+      if (task) {
+        result.taskStatus = task.status;
+      }
+
       // Agent process is gone
       this.logger.logEntry("Monitor", `Agent ${worker.agentName} (${worker.taskId}) runtime dead`, {
         level: "warn",

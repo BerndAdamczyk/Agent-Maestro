@@ -10,6 +10,7 @@ import { readFileSync } from "node:fs";
 import { relative } from "node:path";
 import type { FileChangeEvent, FileChangeType } from "../../../src/types.js";
 import { redactSecrets, stripUnsafeControlChars } from "../../../src/security.js";
+import { formatTimestamp } from "../../../src/utils.js";
 
 export type FileChangeHandler = (event: FileChangeEvent) => void;
 
@@ -65,7 +66,7 @@ export class FileWatcherService {
       path: relPath,
       type,
       content,
-      timestamp: new Date().toISOString(),
+      timestamp: formatTimestamp(),
     };
 
     for (const handler of this.handlers) {

@@ -14,6 +14,7 @@ import type {
   HandoffValidation,
 } from "./types.js";
 import { validateHandoffReport } from "./handoff-validator.js";
+import { formatTimestamp } from "./utils.js";
 
 const TASK_ID_RE = /^task-(\d+)\.md$/;
 
@@ -61,7 +62,7 @@ export class TaskManager {
   }): ParsedTask {
     const id = params.taskId ?? `task-${String(this.nextId++).padStart(3, "0")}`;
     this.bumpNextId(id);
-    const now = new Date().toISOString();
+    const now = formatTimestamp(new Date(), { includeMilliseconds: true });
 
     const task: ParsedTask = {
       id,
@@ -127,7 +128,7 @@ export class TaskManager {
       existing.phase = "none";
     }
 
-    existing.updatedAt = new Date().toISOString();
+    existing.updatedAt = formatTimestamp(new Date(), { includeMilliseconds: true });
     this.writeTask(existing);
     return existing;
   }
@@ -155,7 +156,7 @@ export class TaskManager {
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
     task.status = status;
-    task.updatedAt = new Date().toISOString();
+    task.updatedAt = formatTimestamp(new Date(), { includeMilliseconds: true });
 
     // Phase transitions
     if (status === "plan_approved" && task.phase === "phase_1_plan") {
@@ -171,7 +172,7 @@ export class TaskManager {
 
     task.handoffReport = report;
     task.handoffValidation = null;
-    task.updatedAt = new Date().toISOString();
+    task.updatedAt = formatTimestamp(new Date(), { includeMilliseconds: true });
     this.writeTask(task);
   }
 
@@ -181,7 +182,7 @@ export class TaskManager {
 
     const validation = validateHandoffReport(task.handoffReport);
     task.handoffValidation = validation;
-    task.updatedAt = new Date().toISOString();
+    task.updatedAt = formatTimestamp(new Date(), { includeMilliseconds: true });
     this.writeTask(task);
     return validation;
   }
@@ -191,7 +192,7 @@ export class TaskManager {
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
     task.proposedApproach = approach;
-    task.updatedAt = new Date().toISOString();
+    task.updatedAt = formatTimestamp(new Date(), { includeMilliseconds: true });
     this.writeTask(task);
   }
 
@@ -200,7 +201,7 @@ export class TaskManager {
     if (!task) throw new Error(`Task not found: ${taskId}`);
 
     task.revisionFeedback = feedback;
-    task.updatedAt = new Date().toISOString();
+    task.updatedAt = formatTimestamp(new Date(), { includeMilliseconds: true });
     this.writeTask(task);
   }
 
@@ -332,7 +333,7 @@ export class TaskManager {
     const deps = get("Dependencies");
 
     let handoffReport: HandoffReport | null = null;
-    if (content.includes("## Handoff Report") || content.includes("## Output")) {
+    if (/^## (?:Handoff Report|Handoff|Output)\s*$/m.test(content)) {
       handoffReport = {
         changesMade: getSubSection("Changes Made"),
         patternsFollowed: getSubSection("Patterns Followed"),
@@ -351,7 +352,7 @@ export class TaskManager {
 
       handoffValidation = {
         status: validationStatus,
-        validatedAt: get("Validated At") || new Date().toISOString(),
+        validatedAt: get("Validated At") || formatTimestamp(new Date(), { includeMilliseconds: true }),
         issues: validationIssues,
       };
     }
@@ -371,8 +372,8 @@ export class TaskManager {
       parentTask: get("Parent Task") === "none" ? null : get("Parent Task") || null,
       planFirst: get("Plan First") === "true",
       timeBudget: parseInt(get("Time Budget") || "600", 10),
-      createdAt: get("Created") || new Date().toISOString(),
-      updatedAt: get("Updated") || new Date().toISOString(),
+      createdAt: get("Created") || formatTimestamp(new Date(), { includeMilliseconds: true }),
+      updatedAt: get("Updated") || formatTimestamp(new Date(), { includeMilliseconds: true }),
       handoffReport,
       handoffValidation,
       proposedApproach: getSection("Proposed Approach") || null,

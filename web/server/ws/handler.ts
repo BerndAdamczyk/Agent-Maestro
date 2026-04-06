@@ -9,6 +9,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "node:http";
 import type { FileChangeEvent } from "../../../src/types.js";
+import { formatTimestamp } from "../../../src/utils.js";
 import type { TmuxService } from "../services/tmux-service.js";
 
 interface PaneSubscription {
@@ -67,7 +68,7 @@ export class WebSocketHandler {
       type: "log:entry",
       agent,
       message,
-      timestamp: new Date().toISOString(),
+      timestamp: formatTimestamp(),
     });
     for (const client of this.wss.clients) {
       if (client.readyState === WebSocket.OPEN) {

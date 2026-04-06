@@ -4,6 +4,7 @@
  */
 
 import type { HandoffReport, HandoffValidation } from "./types.js";
+import { formatTimestamp } from "./utils.js";
 
 const SUBSTANTIVE_MIN_LENGTH = 12;
 const PLACEHOLDER_ONLY_RE = /^(?:n\/a|na|none|nothing|todo|tbd|unknown|-|\.\.\.)$/i;
@@ -83,7 +84,7 @@ function validateRequiredSection(
 function buildValidation(issues: string[]): HandoffValidation {
   return {
     status: issues.length === 0 ? "valid" : "invalid",
-    validatedAt: new Date().toISOString(),
+    validatedAt: formatTimestamp(new Date(), { includeMilliseconds: true }),
     issues,
   };
 }
