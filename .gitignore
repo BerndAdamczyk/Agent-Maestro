@@ -8,3 +8,4 @@ dist/
 shared-context/LOCAL.md
 memory/sessions/*.jsonl
 memory/sessions/prompt-*.md
+.omx/
