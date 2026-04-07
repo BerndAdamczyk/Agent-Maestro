@@ -1,12 +1,9 @@
-# Agent Maestro - Architecture Documentation (Arc42)
+# Agent Maestro — Target Architecture Documentation (arc42)
 
-> **Version:** 3.2
-> **Last Updated:** 2026-04-06
-> **Status:** Current architecture + target vision (planned features marked with *[target]*)
-> **Changelog:** v3.2 -- Follow-up clarification pass. `AgentRuntime` contract tightened with explicit launch inputs (`systemPrompt`, `taskFilePath`, `workspaceRoot`, `allowedTools`, `timeoutMs`, `env`) and result outputs (`exitStatus`, `handoffReportPath`, `artifacts[]`, `metrics`) while keeping resume/interrupt/destroy as control operations (5.2.1). Security policy now includes explicit **Always / Ask / Never** rules for secret handling, prompt injection, and high-risk actions (8.5). The non-tmux fallback is now documented as a `child_process.spawn`-backed plain-process runtime in deployment, resilience, ADR-002, and glossary entries. Express baseline is locked to **4.21.x**, with Express 5 deferred until compatibility coverage exists (2.1, 7).
-> v3.1 -- Decision-completion pass for the first real runtime. Locked the concrete execution model: **Pi** as the default agent runtime behind a formal `AgentRuntime` contract, and a deterministic TypeScript Maestro that prefers developer-authored `workspace/plan.md` and otherwise falls back to structured JSON LLM decomposition. Wave scheduling clarified as stable topological sorting with cycle detection (6.1, 6.6, ADR-006). Plan-gate rewritten as a runtime-enforced two-phase protocol with explicit resume semantics (6.2, 8.7). Handoff reports upgraded from convention to lead-enforced quality gate with schema semantics (2.3, 8.16). Security policy made concrete: workspace content treated as untrusted, secret redaction before persistence, and explicit prompt/tool authority boundaries (8.5). Deployment defaults completed for worker containers: prebuilt rootless image, bounded resources, read-write assigned workspace, read-only shared definitions, outbound HTTPS, and plain-process fallback when tmux is unavailable (7, 8.12). Logging, correlation, health checks, and atomic shared-state writes aligned to the runtime protocol (8.6, 8.11).
-> v3.0 -- Ground-up redesign. Renamed Orchestrator to **Maestro**; all code references updated (maestro.ts, agents/maestro.md). Level-based hierarchy: L1 Maestro, L2..n-1 Team-Leads, Ln Worker-Agents. **4-level Agent Memory System** fully wired into architecture: Memory Subsystem as first-class container (5.1) and component diagram (5.2.2) with SessionDAGManager, DailyProtocolFlusher, ExpertiseStore, KnowledgeGraphLoader, GitCheckpointEngine, MemoryAccessControl. Knowledge graph branch loading integrated into PromptAssembler (5.2.1, 8.2). Level 3 storage unified to MEMORY.md/EXPERT.md (no more mental-models/*.yaml). Runtime sequences added: Session DAG branching/rewind (6.7), Silent Memory Flush with pre_compaction lifecycle hook (6.8). Lifecycle state machine updated with Flushing and MemoryPromotion states (8.7). **Tiered process isolation**: containers for Workers, tmux for Leads/Maestro (ADR-002 rewritten). **Model tiering policy** in config and agent frontmatter (8.15). Security section rewritten with hierarchy-aligned isolation model (8.5). Git-Memory integration (8.17), Memory Best Practices (8.18), ADR-008. Deployment view updated with container runtime, git engine, memory/ directory structure. Zod schema validation, schema_version in all file formats. Resolved tech debt D1 (python3), F6 (containers), F21 (YAML parsing).
-> v2.0 -- Comprehensive review incorporating production agent orchestration patterns, NotebookLM research (arc42 + agentic AI guides), and gap analysis. Added: agent lifecycle state machine, timeout/deadlock detection, resource management/backpressure, context window management, conflict resolution, domain model, configuration management, logging/audit trail, 3 new ADRs with alternatives considered for all ADRs, structured risk/debt separation, stimulus-response quality scenarios, expanded glossary, future improvements roadmap (Section 13).
+> **Version:** 4.0
+> **Last Updated:** 2026-04-07
+> **Status:** Target-state architecture and implementation-planning guide
+> **Scope:** This document defines the intended architecture for Agent Maestro in enough concrete detail to guide implementation planning and phased execution. Where the current repository materially differs, the architecture uses short **Implementation status note** callouts instead of parity-heavy prose.
 
 ---
 
@@ -69,6 +66,24 @@ Any agent with the `delegate` tool can spawn sub-agents, who can in turn spawn t
 | Team-Leads (Level 2..n-1) | Domain managers at any intermediate tree level | Review tools, sub-agent coordination, quality gate enforcement, domain-specific expertise management |
 | Worker-Agents (Level n) | Specialists at leaf level | Clear task descriptions, appropriate skills/tools, structured handoff report format |
 | LLM Providers | External services | Stable API access (Google Gemini, Anthropic Claude) |
+
+### 1.5 Reading Conventions
+
+This document is optimized for **implementation planning**, not just descriptive architecture review. It uses four notation patterns consistently:
+
+| Convention | Meaning | Planning rule |
+|------------|---------|---------------|
+| **Implementation status note** | Brief statement about where the current repository is narrower or different than the target architecture | Keep to 2–3 sentences; explain why the gap matters for planning |
+| **Open option** | A viable unresolved path that the architecture intentionally keeps open | Always include tradeoffs/consequences |
+| **Decision trigger** | The event, phase, or milestone that should collapse an open option into a committed choice | Use concrete triggers like "before first remote runtime" or "before provider failover implementation" |
+| **Planned marker** (`*[target]*`, dashed lines, or explicit proposed ADR status) | A target-only element that is not yet required to exist in the current repository | Use to keep ambition visible without pretending current parity |
+
+The arc42/C4 mapping in this document is also explicit:
+- **Section 3** provides the **System Context** (C4 Level 1 / C1)
+- **Section 5.1** provides the **Container view** (C4 Level 2 / C2)
+- **Section 5.2** provides **Component views** (C4 Level 3 / C3)
+- **Section 5.3** provides **Code-level seams and contracts** (C4 Level 4 / C4)
+- **Section 6** complements the static views with runtime and verification flows
 
 ---
 
@@ -148,6 +163,13 @@ graph TB
     style Tracker fill:#666,color:#fff,stroke-dasharray: 5 5
 ```
 
+
+> **Implementation status note:** The current repository already contains a deterministic local orchestrator, runtime abstraction, and research helpers, but not every provider/tool boundary shown in this section exists yet as a first-class in-repo integration. This context model defines the external contract surface that future implementation should converge toward.
+
+The target context boundary is intentionally explicit about four external capability planes: reasoning providers, research/tool surfaces (NotebookLM and future MCP-backed tools), local execution/runtime control, and optional delivery integrations such as SCM or issue tracking.
+
+> **Open option — provider integration seam:** Keep provider access primarily behind the Pi runtime/harness layer, or introduce first-class in-repo provider adapters for planning, execution, and research services. **Tradeoffs:** harness mediation reduces custom client code and centralizes auth; first-class adapters improve observability, policy control, and testability. **Decision trigger:** decide before implementing provider failover and richer NotebookLM/MCP-backed integrations as core orchestration services.
+
 ### 3.2 Business Context
 
 | Communication Partner | Input | Output | Protocol |
@@ -186,6 +208,12 @@ The following fundamental decisions shape the architecture:
 ## 5. Building Block View
 
 The Building Block View uses the C4 model's hierarchical decomposition: Container (Level 2) -> Component (Level 3) -> Code (Level 4).
+
+> **Implementation status note:** The current repository already implements many of the responsibilities described below, but they are spread across multiple modules such as `src/main.ts`, `src/orchestration-engine.ts`, `src/delegation-engine.ts`, `src/prompt-assembler.ts`, `src/runtime/*`, and `src/memory/*`. The diagrams in this section define the **target logical decomposition** that future implementation should converge toward or preserve through equivalent seams.
+
+Planning emphasis in this section: explicit agent roles and boundaries, runtime contracts, shared memory/datastore flows, tool/MCP surfaces, and quality-gate checkpoints between delegation steps.
+
+> **Open option — control-plane packaging:** Keep a single logical Maestro runtime that owns all control-plane responsibilities, or split parts of the control plane into more isolated services/plugins over time. **Tradeoffs:** a single control plane keeps local-first debugging simple; deeper separation improves failure isolation and integration boundaries. **Decision trigger:** decide before introducing non-runtime plugins or remote execution providers beyond the local-first baseline.
 
 ### 5.1 Level 1 -- Container Diagram (C4 Level 2)
 
@@ -287,9 +315,9 @@ graph TB
 
 #### 5.2.1 Maestro Runtime Components
 
-Source: `src/maestro.ts`
+Logical control-plane boundary: `src/maestro.ts` / Maestro runtime module. **Implementation status note:** the current repository distributes this logic across `src/main.ts`, `src/orchestration-engine.ts`, `src/delegation-engine.ts`, `src/prompt-assembler.ts`, and related runtime modules.
 
-The Maestro Runtime is the concrete **deterministic control plane** for v1. It owns plan validation, wave computation, monitoring, and recovery logic. Delegated agent execution is abstracted behind `AgentRuntime`, with `PiRuntime` as the default implementation and a plain-process fallback for environments where `tmux` is unavailable.
+The Maestro Runtime is the concrete **deterministic control plane** for the target architecture. It owns plan validation, wave computation, monitoring, and recovery logic. Delegated agent execution is abstracted behind `AgentRuntime`, with `PiRuntime` as the default implementation and a plain-process fallback for environments where `tmux` is unavailable.
 
 ```mermaid
 graph TB
@@ -619,7 +647,7 @@ graph TB
 
 Key types and interfaces with their source locations.
 
-#### Core Types (`src/maestro.ts`)
+#### Core Types (logical Maestro control-plane boundary)
 
 | Type | Location | Purpose |
 |------|----------|---------|
@@ -692,22 +720,22 @@ updated: 2026-04-05
 schema_version: 1
 ---
 
-## Preferences
+PREFERENCES
 - Prefers explicit error handling over catch-all
 
-## Patterns Learned
+PATTERNS LEARNED
 - **API design for auth endpoints** (confidence: 0.85)
   Always validate token expiry before processing.
   _Source: task-003, 2026-04-04_
 
-## Strengths
+STRENGTHS
 - RESTful API design
 - Database schema optimization
 
-## Mistakes to Avoid
+MISTAKES TO AVOID
 - Do not modify shared config files without checking status.md first
 
-## Collaborations
+COLLABORATIONS
 - **Frontend Dev**: Coordinate on API contract changes via plan.md
 ```
 
@@ -721,15 +749,15 @@ updated: 2026-04-05
 schema_version: 1
 ---
 
-## Coding Standards
+CODING STANDARDS
 - All API endpoints must return structured error objects (code, message, details)
 - Database migrations use sequential numbered files in `migrations/`
 
-## Architecture Patterns
+ARCHITECTURE PATTERNS
 - Repository pattern for all data access
 - Event-driven communication between bounded contexts
 
-## Proven Heuristics
+PROVEN HEURISTICS
 - **Auth token flow** (confidence: 0.95): validate exp → check revocation list → extract claims
   _Source: task-003 reconciliation pass, 2026-04-04_
 ```
@@ -737,6 +765,12 @@ schema_version: 1
 ---
 
 ## 6. Runtime View
+
+> **Implementation status note:** The current repository already performs planning, delegation, monitoring, reconciliation, and resume-oriented orchestration, but its execution remains more centrally mediated than several target flows below. This section defines the future runtime behavior, review gates, and recovery semantics that later implementation phases should achieve.
+
+The runtime view is planning-critical because it specifies who can delegate, where verification gates run, what evidence causes retry/fix loops, and how execution interacts with memory promotion and observability.
+
+> **Open option — recursive delegation boundary:** allow direct agent-side recursive spawning at every delegated level, or keep sub-delegation proposals centrally materialized by the Maestro while preserving the same hierarchy model. **Tradeoffs:** direct spawning maximizes autonomy and local adaptation; Maestro mediation gives stronger auditability, budget control, and replay semantics. **Decision trigger:** resolve before implementing unlimited-depth delegation as a production feature.
 
 ### 6.1 Full Delegation Flow
 
@@ -1104,6 +1138,10 @@ sequenceDiagram
 
 The entire system runs on a single developer machine. Worker-Agents run in containers for security isolation; Team-Leads and Maestro use tmux panes for debuggability.
 
+> **Implementation status note:** The current repository already has hybrid runtime support, but the image lifecycle, plain-process fallback, host hardening, and resource/network guarantees are not yet fully aligned with this target deployment contract. Treat this section as the deployment posture implementation should work toward.
+
+> **Open option — worker sandbox backend:** default to local rootless Docker/Podman workers only, or preserve a compatible sandbox-provider seam for future remote or ephemeral backends. **Tradeoffs:** local containers align with the local-first goal and simplify debugging; a provider seam improves CI portability and future hosted/Windows-compatible execution. **Decision trigger:** decide before adding non-local execution targets or formal Windows support.
+
 For the first real runtime, the worker container policy is fixed: a **prebuilt rootless image** with Pi installed, default limits of **4 CPU / 8 GB RAM / bounded disk**, a **read-write mount of the assigned workspace root** (typically the worker's feature branch or isolated work area), **read-only mounts for shared agent and skill definitions**, and **outbound HTTPS enabled** for LLM API access. If `tmux` is unavailable, the Maestro falls back to a `child_process.spawn`-backed plain-process runtime behind the same `AgentRuntime` contract; orchestration semantics remain unchanged, but attach/debug ergonomics are reduced.
 
 ```mermaid
@@ -1178,6 +1216,12 @@ graph TB
 
 ## 8. Cross-cutting Concepts
 
+This section defines the policies and cross-cutting mechanics that make the target architecture implementable rather than merely diagrammatic.
+
+> **Implementation status note:** Several concepts below already exist partially in the repository, but this section is written as the target behavior contract. Where current behavior is narrower, the goal of the note is to change planning expectations without replacing the target design.
+
+> **Open option — observability backbone:** keep file-native logging plus WebSocket push as the primary visibility plane, or add OTEL-style structured tracing as a parallel backbone for cross-agent causality analysis. **Tradeoffs:** file/native logs are simple and inspectable; structured tracing improves analytics and future tooling integration. **Decision trigger:** decide before implementing cross-session analytics or external observability exports.
+
 ### 8.1 File-based Coordination Protocol
 
 All orchestration state flows through Markdown/YAML files in `workspace/`. This is the system's "message bus."
@@ -1218,7 +1262,7 @@ At delegation time, the Maestro (or any delegating Team-Lead) assembles a full s
 
 The assembled prompt is written to `memory/sessions/prompt-task-NNN.md` for auditability.
 
-Source: `src/maestro.ts` — `assemblePrompt()` function
+Logical target prompt-assembly boundary: Maestro prompt assembly function. **Implementation status note:** current prompt assembly lives across `src/prompt-assembler.ts`, memory helpers, and orchestration entrypoints rather than a single `src/maestro.ts` function.
 
 ### 8.3 Skill Injection (Progressive Disclosure)
 
@@ -1272,14 +1316,14 @@ The memory system implements a **4-level architecture** inspired by human cognit
 ```markdown
 # Daily Protocol: 2026-04-05
 
-## Findings
+FINDINGS
 - [10:15] (backend-dev, confidence: 0.9) Auth token validation must check `exp` field before processing -- discovered during task-003
 - [11:30] (engineering-lead, confidence: 0.85) API rate limiter config lives in `src/middleware/rate-limit.ts`, not in env vars
 
-## Error Patterns
+ERROR PATTERNS
 - [10:45] (backend-dev) `tsc --noEmit` fails on circular import: auth.ts <-> user.ts -- resolved by extracting shared types to types/auth.ts
 
-## Decisions
+DECISIONS
 - [12:00] (maestro) Wave 3 postponed until rate limiter fix confirmed via reconciliation
 ```
 
@@ -1292,7 +1336,7 @@ The memory system implements a **4-level architecture** inspired by human cognit
 *   **Append-only with confidence:** Entries carry confidence scores (0.0-1.0) and are never deleted in-place. Low-confidence entries (< 0.3) are archived by the **ExpertiseStore** component during periodic compaction (configurable interval, default: weekly).
 *   **Structured categories:** `Preferences`, `Patterns Learned`, `Strengths`, `Mistakes to Avoid`, `Collaborations`.
 
-Updated via the `update_memory` tool in `src/maestro.ts`, which delegates to the **ExpertiseStore** component.
+Updated via the Maestro memory-update toolchain, which delegates to the **ExpertiseStore** component. **Implementation status note:** the current repository has supporting memory components, but the full promotion/update loop is still narrower than this target description.
 
 #### Level 4: Structured Knowledge Graph / Deep DAG (Persistent Knowledge)
 
@@ -1305,16 +1349,16 @@ Updated via the `update_memory` tool in `src/maestro.ts`, which delegates to the
 ```markdown
 # Knowledge Graph: Agent Maestro Project
 
-## Architecture
+ARCHITECTURE
 - [API Design](api-design.md) -- REST conventions, versioning strategy
 - [Auth System](auth-system.md) -- Token flow, session management
 - [Database](database.md) -- Schema patterns, migration strategy
 
-## Patterns
+PATTERNS
 - [Error Handling](error-handling.md) -- Cross-cutting error conventions
 - [Testing Strategy](testing-strategy.md) -- Unit/integration/e2e approach
 
-## Decisions
+DECISIONS
 - [ADR Index](decisions/index.md) -- Architecture decision records with context
 ```
 
@@ -1399,7 +1443,7 @@ stateDiagram-v2
     Spawning --> Running: Runtime created\n(tmux pane, container,\nor plain process),\nSession DAG initialized (L1)
     Running --> Flushing: Context > 80% budget\n(pre_compaction hook)
     Flushing --> Running: Silent Memory Flush\ncomplete (L1→L2),\nNO_REPLY sentinel
-    Running --> PlanReady: Worker sets\nstatus: plan_ready
+    Running --> PlanReady: Worker sets\nplan_ready status
     PlanReady --> Spawning: Orchestrator resume\n(plan_approved)
     PlanReady --> PlanRevision: Lead requests\nrevision
     PlanRevision --> Spawning: Orchestrator resume\n(phase_1_plan revision)
@@ -1726,7 +1770,7 @@ System configuration follows a layered model with clear precedence:
 
 | Layer | File | Scope | Override Precedence |
 |-------|------|-------|---------------------|
-| **System defaults** | Hardcoded in `src/maestro.ts` | Timeouts, max panes, wave limits, model tier defaults | Lowest |
+| **System defaults** | Hardcoded in current control-plane modules | Timeouts, max panes, wave limits, model tier defaults | Lowest |
 | **Project config** | `multi-team-config.yaml` | Team structure, agent assignments, paths, model tier policy | Medium |
 | **Agent config** | `agents/*.md` frontmatter | Per-agent model, model_tier, skills, tools, memory permissions, domain | High |
 | **Session config** | CLI args to `run.sh` | Goal, resume flag, overrides | Highest |
@@ -1888,6 +1932,11 @@ Where:
 
 ## 9. Architecture Decisions
 
+The ADRs in this section are part of the target-state planning surface:
+- **Accepted** means the project intends to implement that target-state choice unless later evidence reopens it
+- **Proposed** means the architecture keeps the option open and names the trigger that should resolve it
+- **Implementation status note** callouts keep current-repo divergence brief and local rather than turning this section into an audit
+
 ### ADR-001: File-based Coordination over Database/Message Queue
 
 **Status:** Accepted  
@@ -1972,6 +2021,7 @@ Where:
 ### ADR-005: Plugin-Slot Architecture for Extensibility *[target]*
 
 **Status:** Proposed
+**Decision trigger:** Resolve before the project implements a second SCM/tracker/notifier integration or a runtime backend beyond the current Pi/tmux/container/plain-process seam.
 **Context:** System must support different runtimes (tmux/container/cloud), SCM providers, issue trackers, and notification channels without core coupling. For the first real runtime, the most immediate extensibility seam is agent execution itself: the orchestration logic must remain independent from Pi, tmux, containers, and plain-process fallbacks.
 **Decision:** Define stable plugin interfaces for 6 slots: RuntimePlugin, WorkspacePlugin, SCMPlugin, TrackerPlugin, NotifierPlugin, TerminalPlugin. Core depends on interfaces, not implementations. Within this model, v1 standardizes a concrete `AgentRuntime` contract and ships `PiRuntime` as the default implementation; broader plugin-slot loading remains a target evolution.
 **Alternatives Considered:**
@@ -2048,6 +2098,10 @@ Where:
 ---
 
 ## 10. Quality Requirements
+
+These quality requirements are **target-state acceptance bars** for the implementation roadmap. They should be read as design constraints and future verification targets, not as a claim that every metric is already instrumented today.
+
+> **Implementation status note:** The current repository already demonstrates parts of these qualities, but several scenarios below intentionally set a higher bar than the present baseline — especially around recursive delegation, strict plan-gate enforcement, provider failover, and prompt-budget enforcement. Keep the scenarios because they define what future implementation must prove.
 
 ### 10.1 Quality Tree
 
@@ -2189,64 +2243,89 @@ Quality scenarios follow the arc42-recommended stimulus-response structure: Sour
 
 ## 13. Future Improvements and Evolution Roadmap
 
-This section consolidates all planned improvements, potential enhancements identified during architecture review, and longer-term evolution paths. Items are prioritized by their impact on system reliability, quality, and developer experience.
+This roadmap translates the target architecture into an implementation sequence. It intentionally absorbs the planning value that previously lived in `docs/next-steps.md` so that this document can stand on its own as the primary architecture and sequencing artifact.
 
-### 13.1 High Priority -- Reliability and Correctness
+**Roadmap principle:** stabilize execution trust first, then close the biggest current-vs-target architecture gaps, then expand memory/quality/extensibility capabilities on top of a reliable core.
 
-| # | Improvement | Rationale | Effort |
-|---|------------|-----------|--------|
-| F1 | **Automated test suite** | No tests exist (D2). Every change risks regressions. Core test coverage for config loading, prompt assembly, task parsing, delegation flow, and reconciliation logic. | High |
-| F2 | **Structured error types** | Errors are currently strings (D5). Typed error hierarchy (`SpawnError`, `TimeoutError`, `ReconcileError`, `ProviderError`) enables reliable error handling in parent agents and UI. | Medium |
-| F3 | **Write-ahead task queue** | Persist delegation queue to disk before execution. On crash, replay from last completed task instead of restarting entire session. Critical for long-running multi-wave sessions. | Medium |
-| F4 | **File-level advisory locking** | Eliminate remaining concurrent write edge cases (R4) via `flock()` or lightweight lock manager for `status.md` and `log.md`. | Low |
-| F5 | **LLM failover chain implementation** | Currently documented (ADR-007) but not fully implemented. Provider-level retry with exponential backoff, then failover to secondary/tertiary model. | Medium |
+### 13.1 Phase 1 — Reliability foundation and planning trust
 
-### 13.2 Medium Priority -- Scalability and Robustness
+These are the first implementation priorities because they make every later architecture step safer to execute and easier to verify.
 
-| # | Improvement | Rationale | Effort |
-|---|------------|-----------|--------|
-| F6 | ~~**Container-based RuntimePlugin**~~ | Resolved in v3.0: Worker-Agents run in rootless containers (Docker/Podman) with cgroup limits. Maestro/Team-Leads use tmux. See ADR-002 and Section 8.5. | Done |
-| F7 | **Memory Level 3 compaction and pruning** | Confidence-based archival of low-confidence or outdated entries in MEMORY.md/EXPERT.md. Curator agent (ACE Reflector-Curator pattern) for autonomous knowledge hygiene across all 4 memory levels. Resolves R9. | Medium |
-| F8 | **Correlation-aware observability UI** | Correlation IDs are part of the architecture in v3.1; remaining work is to expose first-class filtering, subtree drill-down, and replay views in the Web UI and structured event backends. | Medium |
-| F9 | **Configurable timeouts and limits** | Extract hardcoded constants (D4) to `multi-team-config.yaml` system section: stall_timeout, wave_timeout, max_panes, max_delegation_depth, time_budget defaults. | Low |
-| F10 | **Git-worktree workspace isolation** | Each agent gets its own git worktree for filesystem isolation. Prevents agents from conflicting on source code. Merge at wave completion. | High |
+| ID | Improvement | Why it comes first | Decision trigger / planning note |
+|---|---|---|---|
+| P1 | **Structured error types** | The control plane needs typed failure classes before deeper recovery, UI drill-down, and automated review loops are trustworthy | Implement before broadening reconciliation and recovery semantics |
+| P2 | **Durable resume via write-ahead task queue** | Resume/recovery is one of the largest current-vs-target gaps and directly affects long-running sessions | Implement before deeper delegation or multi-wave reliability work |
+| P3 | **File-level locking for shared coordination files** | File-based coordination remains a core architectural choice; locking hardens `status.md`, `log.md`, and task mutation paths | Implement before raising concurrency and worker fan-out |
+| P4 | **Correlation-aware observability in the Web UI** | Correlation IDs already belong to the architecture; exposing them in the UI improves debuggability and later verification | Implement before large multi-lane execution or training analytics |
+| P5 | **Per-agent git worktree isolation** | Worktrees reduce source conflicts and make parallel execution safer without abandoning the local-first model | Implement before scaling parallel code-editing lanes |
 
-### 13.3 Medium Priority -- Training and Quality
+### 13.2 Phase 2 — Core architecture realization
 
-| # | Improvement | Rationale | Effort |
-|---|------------|-----------|--------|
-| F11 | **Training pipeline (Reflection-based)** | Post-task reflection: Outcome Evidence -> Reflection Summary -> Mental Model Update -> Skill Delta. ACE Generator-Reflector-Curator loop for autonomous improvement. | High |
-| F12 | **Evidence-gated XP/Gamification** | SQLite-backed skill progression with anti-gaming (diminishing returns, random audits, reopen penalties). XP tied to hard signals only (CI pass, review approval, reconcile success). | High |
-| F13 | **Meta-Agent for team composition** | Policy agent that learns from historical mission outcomes to optimize team formation. Bandit-style exploration of team configurations. | High |
-| F14 | **Cross-agent review protocol** | Bidirectional review: leads rate workers, workers rate leads. Reduces single-direction manipulation. Feeds into XP integrity factor. | Medium |
+This phase closes the most important target-state gaps in orchestration, runtime policy, and deployment semantics.
 
-### 13.4 Lower Priority -- Extensibility and DX
+| ID | Improvement | Target-state outcome | Open option / decision trigger |
+|---|---|---|---|
+| A1 | **Recursive delegation realization** | Move from the current centrally mediated execution style toward the target hierarchy model with quality-gated sub-delegation | Resolve the Section 6 delegation option before productionizing unlimited-depth hierarchy |
+| A2 | **Strict runtime-enforced plan gate** | Make phase-1 planning technically incapable of mutating implementation-owned files before approval | Implement before delegating higher-risk code changes through `plan_first` workflows |
+| A3 | **Runtime contract and handoff artifact normalization** | Make launch/resume/result semantics, artifact capture, and handoff-report quality gates consistent across runtimes | Implement before adding new runtime backends or stronger replay/recovery semantics |
+| A4 | **Host-runtime safety hardening** | Close the gap between target least-privilege policy and host-runtime bash/file authority | Implement before expanding tmux/plain-process execution in high-trust environments |
+| A5 | **Provider failover + model-tier resolution** | Make model/provider selection and retry/failover behavior match the architecture and quality scenarios | Resolve the provider seam from Section 3 before implementing first-class provider failover |
+| A6 | **Deployment contract normalization** | Align container images, resource/network guarantees, and plain-process fallback behavior with the target deployment view | Implement before claiming production-grade local execution guarantees |
 
-| # | Improvement | Rationale | Effort |
-|---|------------|-----------|--------|
-| F15 | **Plugin registry and discovery** | Formalize the 6 plugin slots (ADR-005) with TypeScript interfaces, registration mechanism, and configuration-driven loading. | High |
-| F16 | **SCM integration (GitHub)** | Branch creation, PR management, CI status polling as SCMPlugin. Enables automated code review and merge-readiness quality signals. | Medium |
-| F17 | **Issue tracker integration (Linear/Jira)** | TrackerPlugin for bi-directional issue sync. Link tasks to external tickets. | Medium |
-| F18 | **Notification integration (Slack)** | NotifierPlugin for real-time alerts: wave completion, reconciliation failures, agent stalls. | Low |
-| F19 | **SSE event endpoint** | Replace WebSocket polling-based file watching with Server-Sent Events for simpler unidirectional streaming. Start with polling-SSE, evolve to push-based. | Medium |
-| F20 | **Session-bound web auth** | Replace "bind to localhost" with proper session tokens and rate limiting (D3). Required if system ever supports remote access. | Medium |
-| F21 | ~~**Migrate YAML parsing to npm**~~ | Resolved in v3.0: native `yaml` npm package + Zod schema validation. No python3 dependency. | Done |
+### 13.3 Phase 3 — Memory and knowledge-system maturation
 
-### 13.5 Exploration / Research
+This phase turns the existing memory architecture from a strong concept plus partial scaffolding into a reliable execution substrate.
 
-| # | Area | Description |
-|---|------|-------------|
-| F22 | **Agent-to-Agent protocol (A2A)** | Evaluate Google's A2A protocol for agent capability discovery via `agent.json` cards. Could enable dynamic team formation without manual configuration. |
-| F23 | **Model Context Protocol (MCP)** | Evaluate Anthropic's MCP for standardized tool discovery and integration. Could replace custom tool definitions in agent frontmatter. |
-| F24 | **Symbol-level file locking** | Tree-sitter AST-based locking (Wit protocol pattern) for shared source files. Locks specific functions rather than entire files, enabling finer-grained parallel edits. |
-| F25 | **Local model support** | Run smaller models locally (Ollama, llama.cpp) as fallback when cloud providers are unavailable. Trades quality for availability. |
-| F26 | **Delta-based context optimization** | For follow-up tasks in the same session, send only the changed repository state rather than full context (Longshot pattern). Reduces token consumption. |
-| F27 | **Time-travel debugging** | Leverages the Memory Level 1 JSONL DAG (session context with branching). After a failure, the agent can branch back to a stable checkpoint in the DAG rather than restarting the entire task. |
+| ID | Improvement | Target-state outcome | Decision trigger / planning note |
+|---|---|---|---|
+| M1 | **L2→L3→L4 promotion flow** | Silent flush, lead curation, and Maestro distillation become real lifecycle behaviors rather than only documentation constructs | Implement before relying on memory as a primary long-running quality mechanism |
+| M2 | **Level 3 compaction and pruning** | Long-term memory stays useful instead of growing unbounded and contradictory | Implement before agent memory becomes a dominant prompt component |
+| M3 | **Knowledge-graph curation tooling** | Level 4 becomes easier to maintain and selectively load with consistent metadata | Implement before broad cross-agent reuse of knowledge-graph branches |
+| M4 | **Prompt-budget and progressive skill disclosure** | Prompt assembly honors explicit token budgets and avoids context bloat | Implement before scaling agent/team variety significantly |
+| M5 | **Git-memory/worktree integration hardening** | Memory commits, worktrees, and replay semantics become a coherent operational story | Implement before automated memory/training pipelines depend on git-native isolation |
+
+### 13.4 Phase 4 — Quality, training, and automated review loops
+
+Once the reliability and memory substrate is stable, the project can safely layer on autonomous improvement loops.
+
+| ID | Improvement | Target-state outcome | Decision trigger / planning note |
+|---|---|---|---|
+| Q1 | **Reflection-based training pipeline** | Outcome evidence, reflection summaries, and skill deltas become part of the execution lifecycle | Implement after core execution and memory promotion are trustworthy |
+| Q2 | **Evidence-gated XP / gamification** | Progress signals reward real quality and verification outcomes rather than volume | Implement after hard evidence sources (tests, review, reconcile) are consistently available |
+| Q3 | **Cross-agent review protocol** | Leads and workers produce more reliable bidirectional quality signals | Implement after structured handoff and review semantics are stable |
+| Q4 | **Meta-agent team composition** | Historical mission outcomes influence staffing and team-shape decisions | Implement after sufficient high-quality execution telemetry exists |
+
+### 13.5 Phase 5 — Extensibility and ecosystem integration
+
+This phase expands the local-first core outward without weakening the main control-plane guarantees.
+
+| ID | Improvement | Target-state outcome | Open option / decision trigger |
+|---|---|---|---|
+| E1 | **Plugin registry and discovery** | Formalize runtime/workspace/SCM/tracker/notifier/terminal slots | Resolve ADR-005 before adding the second integration in any slot family |
+| E2 | **SCM integration** | PR/branch/CI awareness becomes a first-class architecture feature | Implement after runtime/handoff semantics are stable enough to drive external systems |
+| E3 | **Issue tracker integration** | External tickets become part of plan/delegation context | Implement after SCM integration or in tandem if both share the same plugin seam |
+| E4 | **Notifier integration** | Operational alerts become configurable rather than ad hoc | Implement after correlation-aware observability provides useful signal sources |
+| E5 | **Session-bound web auth and remote-access posture** | The UI can evolve beyond localhost-only assumptions without weakening safety | Implement before any multi-user or non-localhost access model is introduced |
+| E6 | **Event transport evolution (WebSocket vs SSE)** | Preserve a simple real-time UI path while allowing future simplification or scaling | Decide before adding multi-client dashboards or external event consumers |
+
+### 13.6 Exploration / research backlog
+
+These items remain valuable, but they should not block the earlier roadmap phases.
+
+| ID | Area | Why it matters later |
+|---|---|---|
+| R1 | **Agent-to-Agent protocol (A2A)** | Could improve dynamic capability discovery and team formation once the core hierarchy is stable |
+| R2 | **Model Context Protocol (MCP)** | Could standardize tool discovery and external capability integration once plugin seams mature |
+| R3 | **Symbol-level locking** | Could increase safe parallelism after file-level locking has proven out |
+| R4 | **Local model support** | Could improve resilience/cost posture once baseline provider failover exists |
+| R5 | **Delta-based context optimization** | Could reduce token costs after prompt-budgeting and session DAG tooling are stronger |
+| R6 | **Time-travel debugging via session DAGs** | Could turn Level 1 branching into an operational recovery/debugging tool once DAG semantics are production-ready |
 
 ---
 
 > **Legend:**  
-> - *[target]* -- Planned feature, not yet implemented  
-> - Dashed borders/lines in diagrams indicate planned components  
-> - All file paths are relative to the repository root unless noted otherwise  
-> - Sections 8.7-8.16 in Cross-cutting Concepts were added during the architecture review to address reliability, fault tolerance, resource management, and operational concerns identified as gaps in the initial documentation
+> - *[target]* — Planned or target-state element  
+> - **Implementation status note** — brief present-vs-target divergence that matters for planning  
+> - **Open option** — viable unresolved path with explicit tradeoffs  
+> - **Decision trigger** — the milestone or event that should resolve an open option  
+> - All file paths are relative to the repository root unless noted otherwise
