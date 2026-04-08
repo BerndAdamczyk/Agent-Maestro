@@ -2243,83 +2243,131 @@ Quality scenarios follow the arc42-recommended stimulus-response structure: Sour
 
 ## 13. Future Improvements and Evolution Roadmap
 
-This roadmap translates the target architecture into an implementation sequence. It intentionally absorbs the planning value that previously lived in `docs/next-steps.md` so that this document can stand on its own as the primary architecture and sequencing artifact.
+This roadmap translates the target architecture into a concrete brownfield implementation sequence. It is intentionally grounded in the repository as it exists on **2026-04-08**, not just in the idealized target-state diagrams above.
 
 **Roadmap principle:** stabilize execution trust first, then close the biggest current-vs-target architecture gaps, then expand memory/quality/extensibility capabilities on top of a reliable core.
 
-### 13.1 Phase 1 — Reliability foundation and planning trust
+### 13.1 Current brownfield baseline (validated 2026-04-08)
+
+| Area | Current state in the repository | Evidence / files |
+|---|---|---|
+| Control plane | A deterministic TypeScript control loop already exists and owns bootstrapping, plan loading/generation, delegation, monitoring, remediation, reconciliation, and web startup. | `src/main.ts`, `src/orchestration-engine.ts`, `src/delegation-engine.ts`, `src/monitor-engine.ts`, `src/reconcile-engine.ts` |
+| Task/workspace model | File-based coordination is real today: tasks are materialized as Markdown, `plan_first` and phase transitions are persisted, and write scopes are already first-class plan data. | `src/task-manager.ts`, `src/task-plan.ts`, `src/task-plan-provider.ts`, `workspace/` |
+| Runtime abstraction | The repo already has `tmux`, plain-process, container, hybrid, dry-run, runtime policy, recovery, and runtime logging seams. | `src/startup.ts`, `src/runtime/*`, `src/runtime-manager.ts`, `src/pi-runtime-support.ts` |
+| Memory substrate | The Level 1-4 memory facade and core components exist, but promotion/curation/training loops are still partial. | `src/memory/index.ts`, `src/memory/session-dag.ts`, `src/memory/daily-protocol.ts`, `src/memory/expertise-store.ts`, `src/memory/knowledge-graph.ts`, `src/memory/git-checkpoint.ts` |
+| Web/UI surface | The local web server, REST routes, WebSocket push, file watcher, and a basic SPA already exist. Security headers, loopback-only access, and mutation rate limiting are implemented. | `web/server/index.ts`, `web/server/routes/*`, `web/server/ws/handler.ts`, `web/client/index.html`, `tests/web-security.test.mjs`, `tests/web-realtime.test.mjs` |
+| Quality baseline | The repository currently passes type-checking and the automated test suite. | `npm run lint` ✅ on 2026-04-08; `npm test` ✅ on 2026-04-08 with 74 passing tests |
+| Important current gaps | Recursive delegation is not production-realized, durable resume is partial, file locking is absent, plugin/training/XP services are target-only, NotebookLM is documented but not implemented, and the memory explorer remains a placeholder. | `README.md`, `docs/arc42-architecture.md`, current module inventory |
+| Important architecture drift to resolve early | `README.md` still describes `auto` runtime as container-preferring, but `src/startup.ts` currently returns `PlainProcessAgentRuntime` for `auto` unless dev mode is active. The roadmap should treat this as real implementation drift, not mere documentation wording. | `README.md`, `src/startup.ts` |
+
+### 13.2 Planning guardrails for implementation work
+
+The following assumptions, non-goals, and decision boundaries make the roadmap executable instead of open-ended.
+
+| Category | Planning rule |
+|---|---|
+| Scope assumption | This roadmap covers the **full target architecture**, but sequences it so earlier phases deliver concrete code value before later target-only capabilities such as plugins, XP, and meta-agents. |
+| Delivery style | Implement by **small, reversible vertical slices** rather than by a one-shot rewrite. Prefer compatibility shims and feature flags over broad file moves until behavior is protected by tests. |
+| Non-goal | Do **not** replace file-based coordination as the v1 core datastore. SQLite enters only where the target architecture explicitly calls for event/score/training persistence. |
+| Non-goal | Do **not** rewrite Sections 1–12 into a parity audit. Those sections remain target-state contracts with local implementation status notes. |
+| Non-goal | Do **not** introduce remote/cloud execution, multi-user hosting, or a non-Node control plane before the local-first runtime, recovery, and security phases are complete. |
+| Decision boundary OMX may decide without further confirmation | Exact module/file seams under the existing `src/`, `src/runtime/`, `src/memory/`, and `web/server/` trees; internal schemas for queue/lock/event artifacts; test layout additions; and phase-internal sequencing. |
+| Decision boundary that should still trigger explicit approval | New external paid services, breaking config-file format changes, abandoning local-first execution, or replacing Pi as the default runtime contract instead of keeping it behind a seam. |
+| Pressure-pass finding | The main ambiguity was whether the user wanted only near-term work or the full future-state plan. The existing Section 13 already covered high-level sequencing, so the higher-leverage interpretation is: keep end-to-end scope, but deepen it into current-state-grounded code work packages, touchpoints, and exit criteria. |
+
+### 13.3 Delivery model and phase exit discipline
+
+| Rule | Practical implication |
+|---|---|
+| One roadmap item = one reviewable implementation track | Prefer one branch/PR/epic per roadmap item (`P1`, `A3`, `M4`, etc.) even when multiple files are touched. |
+| Each phase must leave the repo greener than it found it | Every item adds or strengthens automated tests, updates architecture notes, and preserves `npm run lint` + `npm test`. |
+| Runtime changes need scenario tests before broad rollout | Anything that changes launch/resume/recovery/policy behavior must ship with end-to-end tests that simulate failure, resume, or approval transitions. |
+| Architecture drift must be resolved as code or as explicit compatibility notes | If implementation and docs disagree, either change the code or document the divergence where the roadmap item lands. |
+| Later phases may start design work early, but not production coupling | For example, plugin interfaces can be sketched earlier, but plugin loading should not become a hard dependency before the reliability and runtime-contract phases are complete. |
+
+### 13.4 Phase 1 — Reliability foundation and planning trust
 
 These are the first implementation priorities because they make every later architecture step safer to execute and easier to verify.
 
-| ID | Improvement | Why it comes first | Decision trigger / planning note |
-|---|---|---|---|
-| P1 | **Structured error types** | The control plane needs typed failure classes before deeper recovery, UI drill-down, and automated review loops are trustworthy | Implement before broadening reconciliation and recovery semantics |
-| P2 | **Durable resume via write-ahead task queue** | Resume/recovery is one of the largest current-vs-target gaps and directly affects long-running sessions | Implement before deeper delegation or multi-wave reliability work |
-| P3 | **File-level locking for shared coordination files** | File-based coordination remains a core architectural choice; locking hardens `status.md`, `log.md`, and task mutation paths | Implement before raising concurrency and worker fan-out |
-| P4 | **Correlation-aware observability in the Web UI** | Correlation IDs already belong to the architecture; exposing them in the UI improves debuggability and later verification | Implement before large multi-lane execution or training analytics |
-| P5 | **Per-agent git worktree isolation** | Worktrees reduce source conflicts and make parallel execution safer without abandoning the local-first model | Implement before scaling parallel code-editing lanes |
+| ID | Improvement | Current repo evidence / gap | Primary code touchpoints | Detailed implementation plan | Verification / exit criteria |
+|---|---|---|---|---|---|
+| P1 | **Structured error types** | Core modules still throw broad `Error` instances, which weakens recovery decisions, UI drill-down, and testable failure semantics. | `src/main.ts`, `src/orchestration-engine.ts`, `src/delegation-engine.ts`, `src/reconcile-engine.ts`, `src/startup.ts`, `src/runtime/recovery.ts`, `web/server/routes/*`, `src/types.ts` | Introduce a small error taxonomy (`ConfigError`, `PlanError`, `RuntimeError`, `RecoveryError`, `PolicyError`, `UserActionError`) plus structured serialization helpers. Replace ad hoc throws on the orchestration path, map them to remediation behavior, and expose stable API error payloads for the web server. | New unit tests for error mapping; orchestration tests assert class-aware behavior; web route tests assert stable status/body mapping; logs carry machine-readable error kinds. |
+| P2 | **Durable resume via write-ahead task queue** | Active workers and runtime state are persisted, but there is no durable queue of planned launches/retries/reconciliation actions to replay after crashes. | `src/orchestration-engine.ts`, `src/delegation-engine.ts`, `src/task-manager.ts`, `src/startup.ts`, `src/runtime/recovery.ts`, `src/status-manager.ts`, `web/server/routes/session.ts` | Add a persisted queue artifact under `workspace/runtime-state/` that records launch, retry, remediation, and reconcile intents before execution. Make queue entries idempotent via task ID + correlation ID + phase, replay them on resume, and clear them only after durable completion markers are written. | Resume tests cover crash-before-launch, crash-after-launch, and crash-during-remediation scenarios; queue replay never duplicates completed work; session API exposes queued actions. |
+| P3 | **File-level locking for shared coordination files** | Atomic writes exist (`atomicWrite`), but concurrent mutation protection is still a documented target. | `src/utils.ts`, `src/task-manager.ts`, `src/status-manager.ts`, `src/logger.ts`, `src/task-plan.ts`, `src/delegation-engine.ts`, `web/server/routes/actions.ts` | Add a lightweight lock manager for `workspace/status.md`, `workspace/log.md`, canonical plan artifacts, and task mutation paths. Use lease files or advisory locks, include stale-lock detection, and keep write-temp-then-rename as the final commit step. | Concurrency tests simulate overlapping writes; no corrupted coordination artifacts under parallel mutation; contention surfaces clear retryable errors instead of silent overwrites. |
+| P4 | **Correlation-aware observability in the Web UI** | Correlation IDs already exist on tasks and in logs, but the UI cannot yet use them as a first-class execution trace. | `src/logger.ts`, `src/runtime/runtime-log.ts`, `web/server/ws/handler.ts`, `web/server/routes/session.ts`, `web/client/index.html`, `web/client/style.css` | Standardize a structured event envelope for delegation, runtime output, monitor transitions, reconcile runs, and recovery actions. Expose filtered session/event endpoints and upgrade the SPA with task/correlation drill-down views instead of a flat activity feed only. | Web realtime tests assert event classification and filtering; manual smoke test shows a correlation timeline from delegation to completion/failure; event schema is documented in Section 8 and used consistently. |
+| P5 | **Per-agent git worktree isolation** | Git checkpoints exist, but code-editing lanes still share one working tree, increasing conflict risk as parallelism grows. | `src/delegation-engine.ts`, `src/runtime/*`, `src/memory/git-checkpoint.ts`, `src/config.ts`, `multi-team-config.yaml`, `run.sh` | Introduce a worktree manager that provisions a per-task or per-agent worktree for mutating work, injects that path into the runtime launch contract, and tears it down or parks it for resume. Keep read-only tasks on the primary tree to avoid unnecessary overhead. | Integration tests create and clean worktrees in a temp repo; runtime launches see the correct workspace root; parallel edit scenarios no longer share one mutable checkout by default. |
 
-### 13.2 Phase 2 — Core architecture realization
+### 13.5 Phase 2 — Core architecture realization
 
 This phase closes the most important target-state gaps in orchestration, runtime policy, and deployment semantics.
 
-| ID | Improvement | Target-state outcome | Open option / decision trigger |
-|---|---|---|---|
-| A1 | **Recursive delegation realization** | Move from the current centrally mediated execution style toward the target hierarchy model with quality-gated sub-delegation | Resolve the Section 6 delegation option before productionizing unlimited-depth hierarchy |
-| A2 | **Strict runtime-enforced plan gate** | Make phase-1 planning technically incapable of mutating implementation-owned files before approval | Implement before delegating higher-risk code changes through `plan_first` workflows |
-| A3 | **Runtime contract and handoff artifact normalization** | Make launch/resume/result semantics, artifact capture, and handoff-report quality gates consistent across runtimes | Implement before adding new runtime backends or stronger replay/recovery semantics |
-| A4 | **Host-runtime safety hardening** | Close the gap between target least-privilege policy and host-runtime bash/file authority | Implement before expanding tmux/plain-process execution in high-trust environments |
-| A5 | **Provider failover + model-tier resolution** | Make model/provider selection and retry/failover behavior match the architecture and quality scenarios | Resolve the provider seam from Section 3 before implementing first-class provider failover |
-| A6 | **Deployment contract normalization** | Align container images, resource/network guarantees, and plain-process fallback behavior with the target deployment view | Implement before claiming production-grade local execution guarantees |
+| ID | Improvement | Current repo evidence / gap | Primary code touchpoints | Detailed implementation plan | Open option / verification trigger |
+|---|---|---|---|---|---|
+| A1 | **Recursive delegation realization** | The current shipped hierarchy is effectively `Maestro -> Team Leads -> Workers`; unlimited-depth delegation is still architectural intent, not production behavior. | `src/config.ts`, `src/types.ts`, `src/delegation-engine.ts`, `src/orchestration-engine.ts`, `src/prompt-assembler.ts`, `src/task-manager.ts`, `agents/*.md`, `web/client/index.html` | Decide whether sub-delegation is direct agent spawning or Maestro-mediated proposal materialization, then implement the full task-tree model: parent/child task lineage, delegation-depth accounting, task-graph persistence, hierarchical monitoring, and UI tree rendering. Preserve quality gates so deeper delegation does not bypass approval, handoff validation, or budgets. | Resolve the Section 6 recursive-delegation option before production rollout; add an end-to-end scenario with at least three hierarchy levels and a failed child-task recovery path. |
+| A2 | **Strict runtime-enforced plan gate** | Phase tracking and policy narrowing already exist, but the architecture still relies too much on convention to keep planning turns from mutating implementation-owned files. | `src/task-manager.ts`, `src/runtime/policy.ts`, `src/runtime/maestro-policy-extension.ts`, `src/delegation-engine.ts`, `src/monitor-engine.ts`, `web/server/routes/actions.ts`, `tests/runtime-policy.test.mjs` | Make `phase_1_plan -> plan_ready -> plan_approved -> phase_2_execute` a hard state machine. Persist approval artifacts, reject illegal jumps on resume or UI actions, and ensure planning-turn runtimes are technically unable to write outside explicitly allowed planning artifacts. | Policy tests cover illegal transitions and mutation attempts; integration test proves an unapproved plan-first task cannot modify code or falsely self-approve. |
+| A3 | **Runtime contract and handoff artifact normalization** | Multiple runtime backends exist, but launch/result/resume/handoff semantics are not yet normalized into one portable contract. | `src/runtime/agent-runtime.ts`, `src/runtime/plain-process-runtime.ts`, `src/runtime/tmux-agent-runtime.ts`, `src/runtime/container-agent-runtime.ts`, `src/runtime/hybrid-agent-runtime.ts`, `src/runtime/inactive-runtime.ts`, `src/handoff-validator.ts` | Define one canonical runtime lifecycle contract: launch request, progress envelope, terminal result, resume request, artifact capture, and handoff validation status. Make every runtime adapter conform to it and remove backend-specific edge behavior from higher orchestration layers. | Adapter-level tests prove all runtimes emit the same core state/result semantics; orchestration code stops needing runtime-specific conditionals for common lifecycle paths. |
+| A4 | **Host-runtime safety hardening** | The repo already has runtime policy enforcement, but plain-process and tmux execution still inherit more host authority than the target posture intends. | `src/runtime/maestro-policy-extension.ts`, `src/runtime/policy.ts`, `src/runtime/plain-process-runtime.ts`, `src/runtime/tmux-agent-runtime.ts`, `src/security.ts`, `tests/runtime-policy.test.mjs`, `tests/web-security.test.mjs` | Tighten path resolution, shell command classification, secret/environment forwarding, and workspace root enforcement. Add explicit high-trust escape hatches only as opt-in config, not as the default host runtime posture. | Existing policy tests expand to cover path traversal, env leakage, and wrapper-command evasions; manual runtime smoke tests confirm safe defaults still allow intended workflows. |
+| A5 | **Provider failover + model-tier resolution** | Model preset selection and Pi credential support exist, but there is no architecture-grade retry/failover chain for provider outages or tier exhaustion. | `src/model-presets.ts`, `src/pi-runtime-support.ts`, `src/delegation-engine.ts`, `src/prompt-assembler.ts`, runtime launch code, config schema | Introduce an explicit provider/model resolution pipeline: preferred tier, fallback tier, provider capability checks, retry budget, and logged failover reasons. Keep the decision surface behind the runtime seam so Pi remains the default execution contract while provider policy becomes observable and testable. | Resolve the Section 3 provider seam before full failover implementation; tests simulate missing credentials and transient provider failures without collapsing the whole session. |
+| A6 | **Deployment contract normalization** | Hybrid/container/runtime support exists, but actual startup behavior, worker image guarantees, and README claims are not yet aligned with the target deployment contract. | `src/startup.ts`, `src/runtime/container-agent-runtime.ts`, `src/runtime/hybrid-agent-runtime.ts`, `docker/`, `run.sh`, `README.md`, deployment sections of this doc | Reconcile the intended default runtime behavior with the real startup path, normalize container image assumptions, document resource/network guarantees, and define explicit fallback semantics when `tmux` or `docker` are absent. Treat runtime-selection drift as a code-plus-doc issue. | Startup tests cover every runtime mode and tooling-availability combination; README/runtime docs match executable behavior; deployment section no longer contains silent drift. |
 
-### 13.3 Phase 3 — Memory and knowledge-system maturation
+### 13.6 Phase 3 — Memory and knowledge-system maturation
 
 This phase turns the existing memory architecture from a strong concept plus partial scaffolding into a reliable execution substrate.
 
-| ID | Improvement | Target-state outcome | Decision trigger / planning note |
-|---|---|---|---|
-| M1 | **L2→L3→L4 promotion flow** | Silent flush, lead curation, and Maestro distillation become real lifecycle behaviors rather than only documentation constructs | Implement before relying on memory as a primary long-running quality mechanism |
-| M2 | **Level 3 compaction and pruning** | Long-term memory stays useful instead of growing unbounded and contradictory | Implement before agent memory becomes a dominant prompt component |
-| M3 | **Knowledge-graph curation tooling** | Level 4 becomes easier to maintain and selectively load with consistent metadata | Implement before broad cross-agent reuse of knowledge-graph branches |
-| M4 | **Prompt-budget and progressive skill disclosure** | Prompt assembly honors explicit token budgets and avoids context bloat | Implement before scaling agent/team variety significantly |
-| M5 | **Git-memory/worktree integration hardening** | Memory commits, worktrees, and replay semantics become a coherent operational story | Implement before automated memory/training pipelines depend on git-native isolation |
+| ID | Improvement | Current repo evidence / gap | Primary code touchpoints | Detailed implementation plan | Verification / exit criteria |
+|---|---|---|---|---|---|
+| M1 | **L2→L3→L4 promotion flow** | Memory components exist, but promotion from session evidence to curated expertise/knowledge-graph artifacts is still narrower than the documented lifecycle. | `src/memory/session-dag.ts`, `src/memory/daily-protocol.ts`, `src/memory/expertise-store.ts`, `src/memory/knowledge-graph.ts`, orchestration completion hooks | Implement explicit promotion jobs: session close -> daily protocol flush -> lead-curated expertise candidates -> Maestro-approved knowledge-graph distillation. Record provenance so later pruning or correction can trace back to source sessions. | Tests prove promotion preserves provenance and respects access control; completed sessions can be promoted without manual file surgery. |
+| M2 | **Level 3 compaction and pruning** | Expertise storage is append-friendly today, but long-term usefulness will degrade without archival and contradiction handling. | `src/memory/expertise-store.ts`, `src/memory/access-control.ts`, prompt assembly code, future curation helpers | Add compaction policies for stale, duplicate, low-confidence, or superseded memory entries. Keep append-only raw evidence if needed, but generate curated active views for prompt injection. | Compaction tests cover merge/supersede/archive behavior; prompt inputs shrink predictably without losing the most recent trusted patterns. |
+| M3 | **Knowledge-graph curation tooling** | Level 4 loading exists, but editing/metadata hygiene is still largely manual. | `src/memory/knowledge-graph.ts`, `memory/knowledge-graph/`, web memory routes/UI, docs | Standardize graph-node metadata, add validation/repair tools, and create lightweight browse/filter affordances in the web UI so curated knowledge is inspectable instead of opaque files only. | Memory route tests cover graph validation and safe listing; curated nodes can be queried/loaded selectively by domain and confidence. |
+| M4 | **Prompt-budget and progressive skill disclosure** | Prompt assembly already exists, but explicit token budgets and adaptive context loading remain target-only. | `src/prompt-assembler.ts`, `src/memory/*`, `skills/`, `shared-context/`, config schema | Add budget accounting per prompt component (goal, task, skills, memory, shared context), progressive skill loading, and overflow strategies (truncate, summarize, defer). Make the budget visible in logs/events so context pressure becomes observable. | Prompt-assembler tests assert deterministic inclusion/exclusion under constrained budgets; no prompt path exceeds configured limits without a logged reason. |
+| M5 | **Git-memory/worktree integration hardening** | Git checkpoints and future worktree isolation will touch the same operational surface, but they are not yet one coherent lifecycle. | `src/memory/git-checkpoint.ts`, `src/delegation-engine.ts`, `src/runtime/*`, future worktree manager, recovery logic | Unify commit/checkpoint naming, worktree ownership, session resume semantics, and cleanup rules so memory promotion, worker isolation, and replay/recovery do not fight each other. | End-to-end tests cover checkpoint + worktree + resume in one scenario; orphaned worktrees/checkpoints are detectable and recoverable. |
 
-### 13.4 Phase 4 — Quality, training, and automated review loops
+### 13.7 Phase 4 — Quality, training, and automated review loops
 
 Once the reliability and memory substrate is stable, the project can safely layer on autonomous improvement loops.
 
-| ID | Improvement | Target-state outcome | Decision trigger / planning note |
-|---|---|---|---|
-| Q1 | **Reflection-based training pipeline** | Outcome evidence, reflection summaries, and skill deltas become part of the execution lifecycle | Implement after core execution and memory promotion are trustworthy |
-| Q2 | **Evidence-gated XP / gamification** | Progress signals reward real quality and verification outcomes rather than volume | Implement after hard evidence sources (tests, review, reconcile) are consistently available |
-| Q3 | **Cross-agent review protocol** | Leads and workers produce more reliable bidirectional quality signals | Implement after structured handoff and review semantics are stable |
-| Q4 | **Meta-agent team composition** | Historical mission outcomes influence staffing and team-shape decisions | Implement after sufficient high-quality execution telemetry exists |
+| ID | Improvement | Current repo evidence / gap | Primary code touchpoints | Detailed implementation plan | Verification / exit criteria |
+|---|---|---|---|---|---|
+| Q1 | **Reflection-based training pipeline** | The architecture describes it, but there is no in-repo training/reflection pipeline yet. | New `src/training/*` (or equivalent), orchestration completion hooks, memory promotion flow, future event store | Define the minimal pipeline first: outcome evidence collection -> reflection summary -> curated memory update proposal -> optional skill delta. Keep it file-native at first, even if SQLite-backed events appear later. | A completed session can produce a reflection artifact with source evidence links and a reviewable proposed memory/skill update. |
+| Q2 | **Evidence-gated XP / gamification** | No XP ledger exists today; quality signals are present only indirectly through tests/reconcile/handoff outcomes. | Future score/event storage, logger/event schema, reconciliation outputs, review protocol | Introduce XP only after hard evidence sources are normalized. Store XP events as derived artifacts tied to tests, review approvals, reconcile passes, and integrity penalties. Avoid any incentive system that rewards raw task count alone. | XP calculations are reproducible from evidence; no XP path exists without verifiable source events; anti-gaming rules are documented and tested. |
+| Q3 | **Cross-agent review protocol** | Handoff validation exists, but lead/worker review is not yet a richer bidirectional protocol with durable semantics. | `src/handoff-validator.ts`, `src/task-manager.ts`, delegation/remediation flows, web task/action routes | Expand handoffs into reviewable artifacts: reviewer identity, finding severity, required revisions, follow-up closure, and acceptance evidence. Make remediation loops consume structured findings instead of only free-form text. | Task tests cover review-requested, revised, approved, and rejected cycles; remediation becomes more explainable and less heuristic. |
+| Q4 | **Meta-agent team composition** | Historical mission optimization is a target-only idea and should be deferred until telemetry quality is high. | Future analytics/training modules, config/team composition code, event store | Start with offline recommendations based on successful mission history, model tiers, domain coverage, and failure patterns before attempting autonomous staffing decisions. | Team-shape recommendations can be regenerated from telemetry; no autonomous staffing changes happen without operator visibility and override. |
 
-### 13.5 Phase 5 — Extensibility and ecosystem integration
+### 13.8 Phase 5 — Extensibility and ecosystem integration
 
 This phase expands the local-first core outward without weakening the main control-plane guarantees.
 
-| ID | Improvement | Target-state outcome | Open option / decision trigger |
-|---|---|---|---|
-| E1 | **Plugin registry and discovery** | Formalize runtime/workspace/SCM/tracker/notifier/terminal slots | Resolve ADR-005 before adding the second integration in any slot family |
-| E2 | **SCM integration** | PR/branch/CI awareness becomes a first-class architecture feature | Implement after runtime/handoff semantics are stable enough to drive external systems |
-| E3 | **Issue tracker integration** | External tickets become part of plan/delegation context | Implement after SCM integration or in tandem if both share the same plugin seam |
-| E4 | **Notifier integration** | Operational alerts become configurable rather than ad hoc | Implement after correlation-aware observability provides useful signal sources |
-| E5 | **Session-bound web auth and remote-access posture** | The UI can evolve beyond localhost-only assumptions without weakening safety | Implement before any multi-user or non-localhost access model is introduced |
-| E6 | **Event transport evolution (WebSocket vs SSE)** | Preserve a simple real-time UI path while allowing future simplification or scaling | Decide before adding multi-client dashboards or external event consumers |
+| ID | Improvement | Current repo evidence / gap | Primary code touchpoints | Detailed implementation plan | Open option / verification trigger |
+|---|---|---|---|---|---|
+| E1 | **Plugin registry and discovery** | The architecture wants six plugin slots, but today only the runtime seam is materially implemented in code. | `src/runtime/agent-runtime.ts`, config loading, future `src/plugins/*`, docs/ADRs | Formalize slot interfaces incrementally: Runtime first (already present), then Workspace/SCM/Tracker/Notifier/Terminal. Add discovery/registration only after interfaces are stable and tested with at least one non-core implementation. | Resolve ADR-005 before introducing the second integration in any slot family; plugin registry does not become a hard dependency for built-in functionality. |
+| E2 | **SCM integration** | Git exists locally, but PR/branch/CI awareness is not a first-class orchestration capability. | git helpers, future SCM plugin seam, web actions/session views, config | Build SCM integration on top of stable worktree/runtime/handoff semantics: branch provenance, PR summaries, CI status ingestion, and evidence links back into task/review flows. | SCM actions are traceable to task/correlation IDs; failures in external SCM systems do not break local orchestration invariants. |
+| E3 | **Issue tracker integration** | Tracker support is entirely target-state today. | Future tracker plugin seam, task/plan materialization, config | Only add tracker sync after SCM or alongside it if both share the same plugin/event model. Keep external issues as augmenting context, not the sole source of truth for execution state. | A task can link to an external issue without losing local workspace authority; sync failures degrade gracefully. |
+| E4 | **Notifier integration** | Alerts are ad hoc today and not part of a formal slot. | Future notifier plugin seam, event stream, web/session status | Add configurable notifications for important lifecycle events only after correlation-aware observability is in place, so notifications are signal-rich and deduplicated. | Notification rules are testable against structured events; users can disable or swap notifiers without touching core orchestration logic. |
+| E5 | **Session-bound web auth and remote-access posture** | The current server is intentionally loopback-only with security headers and rate limiting, but no auth model exists beyond localhost trust. | `web/server/index.ts`, auth middleware, config, session routes, client boot flow | Introduce session-bound tokens, CSRF-safe mutating flows, and explicit remote-access posture controls only when there is a real need to go beyond localhost. Preserve localhost-safe defaults. | Remote-capable mode is opt-in, authenticated, rate-limited, and documented; localhost-only mode remains the default and simplest path. |
+| E6 | **Event transport evolution (WebSocket vs SSE)** | WebSocket push works today; the architecture keeps transport evolution open. | `web/server/ws/handler.ts`, server bootstrap, client event consumption | Keep the event envelope transport-agnostic. Only revisit the transport after event schemas, filtering, and multi-client needs are clearer. | Decide before adding multi-client dashboards or external consumers; whichever transport remains must preserve correlation-aware event semantics. |
 
-### 13.6 Exploration / research backlog
+### 13.9 Exploration / research backlog
 
 These items remain valuable, but they should not block the earlier roadmap phases.
 
-| ID | Area | Why it matters later |
-|---|---|---|
-| R1 | **Agent-to-Agent protocol (A2A)** | Could improve dynamic capability discovery and team formation once the core hierarchy is stable |
-| R2 | **Model Context Protocol (MCP)** | Could standardize tool discovery and external capability integration once plugin seams mature |
-| R3 | **Symbol-level locking** | Could increase safe parallelism after file-level locking has proven out |
-| R4 | **Local model support** | Could improve resilience/cost posture once baseline provider failover exists |
-| R5 | **Delta-based context optimization** | Could reduce token costs after prompt-budgeting and session DAG tooling are stronger |
-| R6 | **Time-travel debugging via session DAGs** | Could turn Level 1 branching into an operational recovery/debugging tool once DAG semantics are production-ready |
+| ID | Area | Why it matters later | Earliest sensible trigger |
+|---|---|---|---|
+| R1 | **Agent-to-Agent protocol (A2A)** | Could improve dynamic capability discovery and team formation once the hierarchy model is stable. | After A1 + A3 are in production shape |
+| R2 | **Model Context Protocol (MCP)** | Could standardize tool discovery and external capability integration once plugin seams mature. | After E1 with at least one non-runtime slot is real |
+| R3 | **Symbol-level locking** | Could increase safe parallelism after file-level locking has proven out. | After P3 and P5 demonstrate reliable file/worktree isolation |
+| R4 | **Local model support** | Could improve resilience and cost posture once provider failover has a clean contract. | After A5 |
+| R5 | **Delta-based context optimization** | Could reduce token cost once budget-aware prompt assembly exists. | After M4 |
+| R6 | **Time-travel debugging via session DAGs** | Could turn Level 1 branching into an operational debugging/recovery tool once DAG semantics are production-ready. | After M1 and P2 |
+
+### 13.10 Recommended execution cadence
+
+To keep this roadmap implementable in code rather than permanently aspirational, use the following cadence rules:
+
+1. **Finish Phase 1 before claiming production-grade reliability.** The current codebase is already useful, but crash/retry/trace semantics are not yet strong enough to safely support all later ambitions.
+2. **Treat Phase 2 as the architecture-convergence phase.** This is where the target diagrams and the real code structure must become meaningfully aligned.
+3. **Do not start Phase 4 telemetry-dependent automation on weak evidence.** Training, XP, and meta-agent logic should consume normalized events and review artifacts, not heuristics built on unstable runtime behavior.
+4. **Implement Phase 5 through seams proven earlier, not parallel one-offs.** Every external integration should arrive through a stable slot or contract, not by bypassing the control plane.
+5. **Keep Section 13 live.** Each completed roadmap item should update this section with a short status note, any decision that got collapsed, and the verification evidence that proved completion.
 
 ---
 
