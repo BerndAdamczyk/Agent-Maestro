@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { OrchestrationEngine } from "../dist/src/orchestration-engine.js";
+import { OrchestrationError, SpawnBudgetExhaustedError } from "../dist/src/errors.js";
 
 test("run fails when a wave has failed tasks and remediation retries are exhausted", async () => {
   const plan = {
@@ -107,8 +108,111 @@ test("run fails when a wave has failed tasks and remediation retries are exhaust
 
   await assert.rejects(
     engine.run("ping"),
-    /Wave 1 pre-existing failures could not be remediated: task-001/,
+    error =>
+      error instanceof OrchestrationError
+      && error.code === "WAVE_PREEXISTING_FAILURES_UNRESOLVED"
+      && /Wave 1 pre-existing failures could not be remediated: task-001/.test(error.message),
   );
+});
+
+test("launchEligibleTasks treats structured spawn-budget exhaustion as backpressure instead of failure", async () => {
+  const plan = {
+    source: "workspace",
+    sourcePath: "workspace/plan.md",
+    goal: "backpressure",
+    tasks: [
+      {
+        id: "task-001",
+        title: "Wait for capacity",
+        description: "Do not fail when the spawn budget is currently exhausted.",
+        assigned_to: "Engineering Lead",
+        task_type: "implementation",
+        dependencies: [],
+        parent_task: null,
+        plan_first: false,
+        time_budget: 60,
+        acceptance_criteria: [],
+        wave: 1,
+        originalOrder: 0,
+      },
+    ],
+    validation_commands: [],
+  };
+
+  const engine = new OrchestrationEngine({
+    rootDir: process.cwd(),
+    config: {
+      limits: {
+        wave_timeout_seconds: 1,
+        max_reconcile_retries: 0,
+        task_timeout_seconds: 60,
+      },
+      teams: [{ name: "Engineering", lead: { name: "Engineering Lead" } }],
+      maestro: { name: "Maestro" },
+    },
+    session: {
+      status: "active",
+      currentWave: 0,
+    },
+    agentResolver: {
+      getAgentHierarchyLevel: () => 1,
+    },
+    taskPlanService: {
+      hasAuthoritativePlan: () => true,
+      loadAuthoritativePlan: () => plan,
+      materialize: () => [],
+    },
+    taskPlanProvider: {
+      generate: () => {
+        throw new Error("not used");
+      },
+    },
+    taskManager: {
+      readTask: () => ({
+        id: "task-001",
+        status: "pending",
+        assignedTo: "Engineering Lead",
+        title: "Wait for capacity",
+        description: "Do not fail when the spawn budget is currently exhausted.",
+        taskType: "implementation",
+        acceptanceCriteria: [],
+        phase: "none",
+        wave: 1,
+        dependencies: [],
+        parentTask: null,
+        planFirst: false,
+        timeBudget: 60,
+        handoffReport: null,
+        handoffValidation: null,
+        revisionFeedback: null,
+      }),
+    },
+    delegationEngine: {
+      getActiveWorker: () => null,
+      delegate: async () => {
+        throw new SpawnBudgetExhaustedError({ taskId: "task-001" });
+      },
+    },
+    monitorEngine: {},
+    reconcileEngine: {},
+    statusManager: {
+      refresh: () => {},
+    },
+    logger: {
+      logEntry: () => {},
+    },
+    memory: {
+      gitCheckpoint: {
+        waveCheckpoint: () => {},
+      },
+    },
+    runtime: {
+      interrupt: () => {},
+      hasCapacity: () => true,
+    },
+  });
+
+  await assert.doesNotReject(engine.launchEligibleTasks(["task-001"]));
 });
 
 test("run remediates failed wave tasks when actionable findings exist", async () => {

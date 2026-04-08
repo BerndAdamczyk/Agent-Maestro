@@ -27,7 +27,9 @@ import type { MemorySubsystem } from "./memory/index.js";
 import { resolveModelPreset } from "./model-presets.js";
 import { hasPiModelCredentials } from "./pi-runtime-support.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
+import { ExecutionIntentQueue } from "./runtime/intent-queue.js";
 import { RuntimePolicyManager } from "./runtime/policy.js";
+import { MaestroError, SpawnBudgetExhaustedError } from "./errors.js";
 import { atomicWrite } from "./utils.js";
 import { WorktreeManager } from "./worktree-manager.js";
 
@@ -49,6 +51,7 @@ export class DelegationEngine {
   private activeWorkers = new Map<string, ActiveWorker>();
   private delegationQueue: DelegationQueue[] = [];
   private activeWorkerStatePath: string;
+  private intentQueue: ExecutionIntentQueue;
   private worktreeManager: WorktreeManager;
 
   constructor(
@@ -177,27 +180,41 @@ export class DelegationEngine {
     });
     const model = this.pickLaunchModel(agent);
     const workspaceAllocation = this.worktreeManager.allocate(task.id, task.writeScope);
-
-    const runtimeHandle = this.runtime.launch({
-      agentName: params.agentName,
-      taskId: task.id,
-      correlationId: task.correlationId,
-      role,
-      phase: task.phase,
-      model,
-      systemPrompt: prompt,
-      promptFilePath: policy.promptFilePath,
-      taskFilePath: this.taskManager.getTaskFilePath(task.id),
-      sessionFilePath: policy.sessionFilePath,
-      policyManifestPath: this.policyManager.getPolicyManifestPath(task.id),
-      workspaceRoot: workspaceAllocation.rootDir,
-      allowedTools: policy.allowedTools,
-      timeoutMs: params.timeBudget * 1000,
-      env: {
-        MAESTRO_TASK_ID: task.id,
-        MAESTRO_AGENT_NAME: params.agentName,
-        ...(workspaceAllocation.isolated ? { MAESTRO_WORKTREE_ROOT: workspaceAllocation.rootDir } : {}),
-      },
+    this.intentQueue.markInProgress(launchIntent.id);
+    let runtimeHandle;
+    try {
+      runtimeHandle = this.runtime.launch({
+        agentName: params.agentName,
+        taskId: task.id,
+        correlationId: task.correlationId,
+        role,
+        phase: task.phase,
+        model,
+        systemPrompt: prompt,
+        promptFilePath: policy.promptFilePath,
+        taskFilePath: this.taskManager.getTaskFilePath(task.id),
+        sessionFilePath: policy.sessionFilePath,
+        policyManifestPath: this.policyManager.getPolicyManifestPath(task.id),
+        workspaceRoot: workspaceAllocation.rootDir,
+        allowedTools: policy.allowedTools,
+        timeoutMs: params.timeBudget * 1000,
+        env: {
+          MAESTRO_TASK_ID: task.id,
+          MAESTRO_AGENT_NAME: params.agentName,
+          ...(workspaceAllocation.isolated ? { MAESTRO_WORKTREE_ROOT: workspaceAllocation.rootDir } : {}),
+        },
+      });
+    } catch (error) {
+      this.intentQueue.markFailed(launchIntent.id, error);
+      if (workspaceAllocation.isolated) {
+        this.worktreeManager.finalize(task.id, "failed");
+      }
+      throw error;
+    }
+    this.intentQueue.markCompleted(launchIntent.id, {
+      runtimeId: runtimeHandle.id,
+      runtimeType: runtimeHandle.runtimeType,
+      note: "Runtime launch persisted successfully",
     });
     this.memory.sessionDAG.append(task.id, {
       role: "assistant",

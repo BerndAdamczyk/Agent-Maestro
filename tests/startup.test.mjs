@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createAgentRuntime, hasExistingSessionState } from "../dist/src/startup.js";
+import { ConfigError } from "../dist/src/errors.js";
 import { HybridAgentRuntime } from "../dist/src/runtime/hybrid-agent-runtime.js";
 import { PlainProcessAgentRuntime } from "../dist/src/runtime/plain-process-runtime.js";
 import { TmuxAgentRuntime } from "../dist/src/runtime/tmux-agent-runtime.js";
@@ -73,6 +74,17 @@ test("createAgentRuntime auto mode falls back to plain-process when host tooling
   });
 
   assert.ok(runtime instanceof PlainProcessAgentRuntime);
+});
+
+test("createAgentRuntime rejects unsupported runtime modes with a structured config error", () => {
+  assert.throws(
+    () => createAgentRuntime("bogus-mode", baseConfig, {
+      hasTmuxBinary: () => false,
+      hasDockerRuntime: () => false,
+      devMode: false,
+    }),
+    error => error instanceof ConfigError && error.code === "UNSUPPORTED_RUNTIME_MODE",
+  );
 });
 
 test("hasExistingSessionState ignores an authoritative plan file on a fresh workspace", () => {

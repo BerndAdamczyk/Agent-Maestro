@@ -35,6 +35,32 @@ export class RetryableMaestroError extends MaestroError {
   }
 }
 
+export class ConfigError extends MaestroError {
+  constructor(
+    code: string,
+    message: string,
+    options: {
+      cause?: unknown;
+      details?: Record<string, unknown>;
+    } = {},
+  ) {
+    super(code, message, options);
+  }
+}
+
+export class OrchestrationError extends MaestroError {
+  constructor(
+    code: string,
+    message: string,
+    options: {
+      cause?: unknown;
+      details?: Record<string, unknown>;
+    } = {},
+  ) {
+    super(code, message, options);
+  }
+}
+
 export class SpawnBudgetExhaustedError extends RetryableMaestroError {
   constructor(details: Record<string, unknown> = {}) {
     super("SPAWN_BUDGET_EXHAUSTED", "Spawn budget exhausted, delegation queued", { details });

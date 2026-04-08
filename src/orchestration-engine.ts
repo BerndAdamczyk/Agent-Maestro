@@ -20,6 +20,7 @@ import type {
   SystemConfig,
 } from "./types.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
+import { OrchestrationError, SpawnBudgetExhaustedError } from "./errors.js";
 
 export class OrchestrationEngine {
   private rootDir: string;
@@ -102,7 +103,16 @@ export class OrchestrationEngine {
         const remediated = await this.runRemediationLoop(wave, preexistingFailures);
         if (!remediated) {
           this.session.status = "failed";
-          throw new Error(`Wave ${wave} pre-existing failures could not be remediated: ${preexistingFailures.join(", ")}`);
+          throw new OrchestrationError(
+            "WAVE_PREEXISTING_FAILURES_UNRESOLVED",
+            `Wave ${wave} pre-existing failures could not be remediated: ${preexistingFailures.join(", ")}`,
+            {
+              details: {
+                wave,
+                failedTaskIds: preexistingFailures,
+              },
+            },
+          );
         }
         // After successful remediation, check if the wave is now complete
         if (this.areTasksComplete(waveTaskIds)) {
@@ -124,14 +134,34 @@ export class OrchestrationEngine {
 
       if (waitResult.status === "timeout") {
         this.session.status = "failed";
-        throw new Error(`Wave ${wave} exceeded the configured timeout`);
+        throw new OrchestrationError(
+          "WAVE_TIMEOUT_EXCEEDED",
+          `Wave ${wave} exceeded the configured timeout`,
+          {
+            details: {
+              wave,
+              timeoutSeconds: this.config.limits.wave_timeout_seconds,
+              taskIds: waveTaskIds,
+            },
+          },
+        );
       }
 
       if (waitResult.status === "failed") {
         const remediated = await this.runRemediationLoop(wave, waitResult.failedTaskIds);
         if (!remediated) {
           this.session.status = "failed";
-          throw new Error(`Wave ${wave} failed tasks after exhausting remediation retries: ${waitResult.failedTaskIds.join(", ")}`);
+          throw new OrchestrationError(
+            "WAVE_REMEDIATION_RETRIES_EXHAUSTED",
+            `Wave ${wave} failed tasks after exhausting remediation retries: ${waitResult.failedTaskIds.join(", ")}`,
+            {
+              details: {
+                wave,
+                failedTaskIds: waitResult.failedTaskIds,
+                maxRetries: this.config.limits.max_reconcile_retries,
+              },
+            },
+          );
         }
       }
 
@@ -147,7 +177,16 @@ export class OrchestrationEngine {
         const reconciled = await this.runReconciliationLoop(wave, plan.validation_commands);
         if (!reconciled) {
           this.session.status = "failed";
-          throw new Error(`Reconciliation failed after wave ${wave}`);
+          throw new OrchestrationError(
+            "WAVE_RECONCILIATION_FAILED",
+            `Reconciliation failed after wave ${wave}`,
+            {
+              details: {
+                wave,
+                commands: plan.validation_commands,
+              },
+            },
+          );
         }
       }
     }
@@ -239,7 +278,7 @@ export class OrchestrationEngine {
           delegationDepth: Math.max(0, this.agentResolver.getAgentHierarchyLevel(task.assignedTo) - 1),
         });
       } catch (error: any) {
-        if (String(error?.message ?? "").includes("Spawn budget exhausted")) {
+        if (error instanceof SpawnBudgetExhaustedError || error?.code === "SPAWN_BUDGET_EXHAUSTED") {
           return;
         }
         throw error;

@@ -12,11 +12,12 @@
  *   npm run dev            — watch mode (rebuilds on file change)
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync, watch } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync, watch, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, "..");
@@ -29,27 +30,41 @@ const MMDC = join(ROOT, "node_modules", ".bin", "mmdc");
 // ── Mermaid rendering ──────────────────────────────────────────────
 
 function renderMermaidBlock(code, index) {
-  const tmp = join(tmpdir(), `mermaid-${process.pid}-${index}`);
+  const tmp = join(tmpdir(), `mermaid-${process.pid}-${index}-${randomUUID()}`);
   const inputFile = `${tmp}.mmd`;
   const outputFile = `${tmp}.svg`;
 
   writeFileSync(inputFile, code, "utf-8");
 
   try {
-    execSync(
-      `${MMDC} -i "${inputFile}" -o "${outputFile}" -b transparent --quiet`,
-      { stdio: "pipe", timeout: 30000 }
-    );
+    let lastError = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        execFileSync(
+          MMDC,
+          ["-i", inputFile, "-o", outputFile, "-b", "transparent", "--quiet"],
+          { stdio: "pipe", timeout: 30000 },
+        );
+        lastError = null;
+        break;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (lastError) {
+      throw lastError;
+    }
+
     const svg = readFileSync(outputFile, "utf-8");
-    // Clean up temp files
-    try {
-      execSync(`rm -f "${inputFile}" "${outputFile}"`, { stdio: "ignore" });
-    } catch {}
     return svg;
   } catch (err) {
     console.error(`  Warning: Failed to render diagram ${index + 1}: ${err.message}`);
     // Fallback: return the raw code in a <pre> block
     return `<pre class="mermaid-error"><code>${escapeHtml(code)}</code></pre>`;
+  } finally {
+    rmSync(inputFile, { force: true });
+    rmSync(outputFile, { force: true });
   }
 }
 

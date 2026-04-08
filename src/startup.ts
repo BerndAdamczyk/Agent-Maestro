@@ -9,6 +9,7 @@ import { DryRunAgentRuntime } from "./runtime/dry-run-runtime.js";
 import { PlainProcessAgentRuntime } from "./runtime/plain-process-runtime.js";
 import { ContainerAgentRuntime } from "./runtime/container-agent-runtime.js";
 import { HybridAgentRuntime } from "./runtime/hybrid-agent-runtime.js";
+import { ConfigError } from "./errors.js";
 
 export interface RuntimeDetectionOptions {
   hasTmuxBinary?: () => boolean;
@@ -56,7 +57,16 @@ export function createAgentRuntime(
     case "tmux":
       return hostRuntime;
     default:
-      throw new Error(`Unsupported runtime '${mode}'. Expected 'auto', 'tmux', 'plain-process', 'container', or 'dry-run'.`);
+      throw new ConfigError(
+        "UNSUPPORTED_RUNTIME_MODE",
+        `Unsupported runtime '${mode}'. Expected 'auto', 'tmux', 'plain-process', 'container', or 'dry-run'.`,
+        {
+          details: {
+            mode,
+            supportedModes: ["auto", "tmux", "plain-process", "container", "dry-run"],
+          },
+        },
+      );
   }
 }
 
