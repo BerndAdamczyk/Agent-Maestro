@@ -10,18 +10,22 @@ import { execSync } from "node:child_process";
 import type { ReconcileResult, SystemConfig } from "./types.js";
 import type { TaskManager } from "./task-manager.js";
 import type { Logger } from "./logger.js";
+import { ExecutionIntentQueue } from "./runtime/intent-queue.js";
+import { join } from "node:path";
 
 export class ReconcileEngine {
   private config: SystemConfig;
   private taskManager: TaskManager;
   private logger: Logger;
   private rootDir: string;
+  private intentQueue: ExecutionIntentQueue;
 
   constructor(rootDir: string, config: SystemConfig, taskManager: TaskManager, logger: Logger) {
     this.rootDir = rootDir;
     this.config = config;
     this.taskManager = taskManager;
     this.logger = logger;
+    this.intentQueue = new ExecutionIntentQueue(join(rootDir, config.paths.workspace));
   }
 
   /**
@@ -29,6 +33,13 @@ export class ReconcileEngine {
    */
   run(command: string): ReconcileResult {
     this.logger.logEntry("Reconcile", `Running: ${command}`, { level: "info" });
+    const intent = this.intentQueue.enqueueCommandIntent({
+      kind: "reconcile",
+      taskId: `reconcile:${Buffer.from(command).toString("base64url").slice(0, 24)}`,
+      agentName: "Reconcile",
+      command,
+    });
+    this.intentQueue.markInProgress(intent.id);
 
     let stdout = "";
     let stderr = "";
@@ -48,6 +59,14 @@ export class ReconcileEngine {
     }
 
     const passed = exitCode === 0;
+    if (passed) {
+      this.intentQueue.markCompleted(intent.id, {
+        runtimeType: "unknown",
+        note: "Reconciliation command passed",
+      });
+    } else {
+      this.intentQueue.markFailed(intent.id, new Error(`Reconciliation command failed with exit ${exitCode}`));
+    }
 
     this.logger.logEntry(
       "Reconcile",

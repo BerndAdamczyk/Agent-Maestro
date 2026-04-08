@@ -38,14 +38,56 @@ export class ExecutionIntentQueue {
   }
 
   enqueueLaunch(params: DelegationParams, correlationId: string | null): ExecutionIntentRecord {
-    const dedupeKey = this.buildDedupeKey("launch", params.taskId);
+    return this.enqueueIntent({
+      kind: "launch",
+      taskId: params.taskId,
+      correlationId,
+      params,
+      metadata: {
+        phase: params.phase,
+      },
+      lifecycle: "launch_requested",
+    });
+  }
+
+  enqueueCommandIntent(params: {
+    kind: "reconcile" | "remediation";
+    taskId: string;
+    correlationId?: string | null;
+    agentName?: string;
+    command: string;
+    note?: string;
+  }): ExecutionIntentRecord {
+    return this.enqueueIntent({
+      kind: params.kind,
+      taskId: params.taskId,
+      correlationId: params.correlationId ?? null,
+      params: this.syntheticParams(params.taskId, params.agentName ?? titleCase(params.kind)),
+      metadata: {
+        command: params.command,
+        note: params.note ?? null,
+      },
+      lifecycle: "launch_requested",
+    });
+  }
+
+  enqueueIntent(params: {
+    kind: ExecutionIntentKind;
+    taskId: string;
+    correlationId: string | null;
+    params: DelegationParams;
+    metadata?: Record<string, unknown>;
+    lifecycle: RuntimeEventEnvelope["lifecycle"];
+  }): ExecutionIntentRecord {
+    const dedupeKey = this.buildDedupeKey(params.kind, params.taskId);
     const queue = this.list();
     const now = formatTimestamp(new Date(), { includeMilliseconds: true });
     const existing = queue.find(intent => intent.dedupeKey === dedupeKey);
 
     if (existing) {
-      existing.params = params;
-      existing.correlationId = correlationId;
+      existing.params = params.params;
+      existing.correlationId = params.correlationId;
+      existing.metadata = params.metadata ?? existing.metadata;
       existing.updatedAt = now;
       if (existing.status === "failed" || existing.status === "skipped") {
         existing.status = "pending";
@@ -58,18 +100,19 @@ export class ExecutionIntentQueue {
 
     const record: ExecutionIntentRecord = {
       id: randomUUID(),
-      kind: "launch",
+      kind: params.kind,
       status: "pending",
       dedupeKey,
       taskId: params.taskId,
-      correlationId,
-      params,
+      correlationId: params.correlationId,
+      params: params.params,
+      metadata: params.metadata,
       createdAt: now,
       updatedAt: now,
       attempts: 0,
       lastError: null,
       result: null,
-      events: [this.createQueueEvent(params, correlationId, "launch_requested")],
+      events: [this.createQueueEvent(params.params, params.correlationId, params.lifecycle, params.kind, params.metadata)],
     };
 
     queue.push(record);
@@ -130,7 +173,8 @@ export class ExecutionIntentQueue {
           message: `Task missing during launch replay: ${intent.taskId}`,
           code: "TASK_NOT_FOUND",
         };
-        intent.events.push(this.createQueueEvent(intent.params, intent.correlationId, "failed", {
+        intent.events.push(this.createQueueEvent(intent.params, intent.correlationId, "failed", intent.kind, {
+          ...intent.metadata,
           note: "task missing during replay",
         }));
         dirty = true;
@@ -141,7 +185,8 @@ export class ExecutionIntentQueue {
         intent.status = "skipped";
         intent.updatedAt = formatTimestamp(new Date(), { includeMilliseconds: true });
         intent.result = { note: `Task already terminal during replay: ${task.status}` };
-        intent.events.push(this.createQueueEvent(intent.params, intent.correlationId, "replayed", {
+        intent.events.push(this.createQueueEvent(intent.params, intent.correlationId, "replayed", intent.kind, {
+          ...intent.metadata,
           note: `task already ${task.status}`,
         }));
         dirty = true;
@@ -152,7 +197,8 @@ export class ExecutionIntentQueue {
         intent.status = "skipped";
         intent.updatedAt = formatTimestamp(new Date(), { includeMilliseconds: true });
         intent.result = { note: "Active worker already exists during replay" };
-        intent.events.push(this.createQueueEvent(intent.params, intent.correlationId, "replayed", {
+        intent.events.push(this.createQueueEvent(intent.params, intent.correlationId, "replayed", intent.kind, {
+          ...intent.metadata,
           note: "active worker already exists",
         }));
         dirty = true;
@@ -161,7 +207,8 @@ export class ExecutionIntentQueue {
 
       intent.status = "pending";
       intent.updatedAt = formatTimestamp(new Date(), { includeMilliseconds: true });
-      intent.events.push(this.createQueueEvent(intent.params, intent.correlationId, "replayed", {
+      intent.events.push(this.createQueueEvent(intent.params, intent.correlationId, "replayed", intent.kind, {
+        ...intent.metadata,
         note: "launch re-queued during replay",
       }));
       replayable.push(intent.params);
@@ -196,7 +243,8 @@ export class ExecutionIntentQueue {
     intent.attempts += options.attemptsDelta ?? 0;
     intent.result = options.result ?? intent.result;
     intent.lastError = options.lastError ?? null;
-    intent.events.push(this.createQueueEvent(intent.params, intent.correlationId, options.lifecycle, {
+    intent.events.push(this.createQueueEvent(intent.params, intent.correlationId, options.lifecycle, intent.kind, {
+      ...intent.metadata,
       runtimeId: options.runtimeId ?? null,
       runtimeType: options.runtimeType ?? "unknown",
       status,
@@ -216,6 +264,7 @@ export class ExecutionIntentQueue {
     params: DelegationParams,
     correlationId: string | null,
     lifecycle: RuntimeEventEnvelope["lifecycle"],
+    kind: ExecutionIntentKind,
     details: Record<string, unknown> = {},
   ): RuntimeEventEnvelope {
     return createRuntimeEventEnvelope({
@@ -227,14 +276,36 @@ export class ExecutionIntentQueue {
       runtimeType: "unknown",
       runtimeId: null,
       details: {
-        intentKind: "launch",
+        intentKind: kind,
         phase: params.phase,
         ...details,
       },
     });
   }
 
+  private syntheticParams(taskId: string, agentName: string): DelegationParams {
+    return {
+      agentName,
+      taskId,
+      taskTitle: taskId,
+      taskDescription: taskId,
+      taskType: "system",
+      acceptanceCriteria: [],
+      phase: "none",
+      wave: 0,
+      dependencies: [],
+      planFirst: false,
+      timeBudget: 0,
+      parentTaskId: null,
+      delegationDepth: 0,
+    };
+  }
+
   private write(queue: ExecutionIntentRecord[]): void {
     atomicWrite(this.queuePath, JSON.stringify(queue, null, 2));
   }
+}
+
+function titleCase(value: string): string {
+  return value.slice(0, 1).toUpperCase() + value.slice(1);
 }

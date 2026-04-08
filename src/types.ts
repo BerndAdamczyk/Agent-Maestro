@@ -475,6 +475,7 @@ export interface ExecutionIntentRecord {
   taskId: string;
   correlationId: string | null;
   params: DelegationParams;
+  metadata?: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
   attempts: number;
