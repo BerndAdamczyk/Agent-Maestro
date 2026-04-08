@@ -14,6 +14,7 @@ import { RuntimeManager } from "../runtime-manager.js";
 import { getForwardedProviderEnv, resolvePiAgentDir, resolvePiCommand } from "../pi-runtime-support.js";
 import { appendRuntimeObservation } from "./runtime-log.js";
 import { finalizeRuntimeResult, writeTurnMessage } from "./pi-runtime-common.js";
+import { appendRuntimeLifecycleEvent, createRuntimeEventEnvelope } from "./contracts.js";
 
 interface TmuxState {
   workspaceRoot: string;
@@ -80,7 +81,7 @@ export class TmuxAgentRuntime implements AgentRuntime {
       currentTurnToken: null,
       pendingResume: null,
       correlationId: params.correlationId ?? null,
-      result: {
+      result: appendRuntimeLifecycleEvent({
         exitStatus: "running",
         handoffReportPath: params.taskFilePath,
         artifacts: [
@@ -106,7 +107,14 @@ export class TmuxAgentRuntime implements AgentRuntime {
           retryCount: 0,
           failoverCount: 0,
         },
-      },
+      }, createRuntimeEventEnvelope({
+        lifecycle: "launch_requested",
+        taskId: params.taskId,
+        correlationId: params.correlationId ?? null,
+        agentName: params.agentName,
+        runtimeType: "tmux",
+        runtimeId: paneId,
+      })),
     };
 
     this.states.set(paneId, state);
@@ -125,6 +133,15 @@ export class TmuxAgentRuntime implements AgentRuntime {
       state.policyManifestPath = params.policyManifestPath;
     }
     if (this.isAlive(handle)) {
+      state.result = appendRuntimeLifecycleEvent(state.result, createRuntimeEventEnvelope({
+        lifecycle: "resume_requested",
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+        agentName: handle.agentName,
+        runtimeType: handle.runtimeType,
+        runtimeId: handle.id,
+      }));
+      this.results.set(handle.id, state.result);
       state.pendingResume = params;
       return;
     }
@@ -138,8 +155,29 @@ export class TmuxAgentRuntime implements AgentRuntime {
     if (!this.manager.isAlive(handle.id)) return false;
     if (!state.currentTurnToken) return false;
     const output = this.manager.capturePane(handle.id, 200);
-    if (!output.includes(`__MAESTRO_TURN_END__:${state.currentTurnToken}:`)) {
+    const endMarker = `__MAESTRO_TURN_END__:${state.currentTurnToken}:`;
+    if (!output.includes(endMarker)) {
       return true;
+    }
+
+    const exitCode = parseTurnExitCode(output, endMarker);
+    if (state.result.exitStatus === "running") {
+      state.result = appendRuntimeLifecycleEvent(
+        finalizeRuntimeResult(state.result, exitCode === 0 ? "completed" : "failed"),
+        createRuntimeEventEnvelope({
+          lifecycle: exitCode === 0 ? "completed" : "failed",
+          taskId: handle.taskId,
+          correlationId: state.correlationId,
+          agentName: handle.agentName,
+          runtimeType: handle.runtimeType,
+          runtimeId: handle.id,
+          details: {
+            exitCode,
+            turnNumber: state.turnNumber,
+          },
+        }),
+      );
+      this.results.set(handle.id, state.result);
     }
 
     return this.runPendingResume(handle, state);
@@ -159,7 +197,18 @@ export class TmuxAgentRuntime implements AgentRuntime {
       correlationId: state.correlationId,
     });
     this.manager.sendInterrupt(handle.id);
-    state.result = finalizeRuntimeResult(state.result, "interrupted");
+    state.result = appendRuntimeLifecycleEvent(
+      finalizeRuntimeResult(state.result, "interrupted"),
+      createRuntimeEventEnvelope({
+        lifecycle: "interrupted",
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+        agentName: handle.agentName,
+        runtimeType: handle.runtimeType,
+        runtimeId: handle.id,
+        details: { reason },
+      }),
+    );
     this.results.set(handle.id, state.result);
   }
 
@@ -172,7 +221,17 @@ export class TmuxAgentRuntime implements AgentRuntime {
 
     state.pendingResume = null;
     if (state.result.exitStatus === "running") {
-      state.result = finalizeRuntimeResult(state.result, "interrupted");
+      state.result = appendRuntimeLifecycleEvent(
+        finalizeRuntimeResult(state.result, "interrupted"),
+        createRuntimeEventEnvelope({
+          lifecycle: "destroyed",
+          taskId: handle.taskId,
+          correlationId: state.correlationId,
+          agentName: handle.agentName,
+          runtimeType: handle.runtimeType,
+          runtimeId: handle.id,
+        }),
+      );
       this.results.set(handle.id, state.result);
     }
 
@@ -207,6 +266,18 @@ export class TmuxAgentRuntime implements AgentRuntime {
         retryCount: state.turnNumber - 1,
       },
     };
+    state.result = appendRuntimeLifecycleEvent(state.result, createRuntimeEventEnvelope({
+      lifecycle: state.turnNumber === 1 ? "launch_started" : "resume_started",
+      taskId: handle.taskId,
+      correlationId: state.correlationId,
+      agentName: handle.agentName,
+      runtimeType: handle.runtimeType,
+      runtimeId: handle.id,
+      details: {
+        phase,
+        turnNumber: state.turnNumber,
+      },
+    }));
     this.results.set(handle.id, state.result);
 
     const messageFile = writeTurnMessage(
@@ -260,6 +331,17 @@ function buildEnvPrefix(env: Record<string, string>): string {
   return Object.entries(env)
     .map(([key, value]) => `${key}=${shellQuote(value)}`)
     .join(" ");
+}
+
+function parseTurnExitCode(output: string, endMarker: string): number {
+  const pattern = new RegExp(`${escapeRegExp(endMarker)}(\\d+)`);
+  const match = output.match(pattern);
+  const value = Number.parseInt(match?.[1] ?? "", 10);
+  return Number.isInteger(value) ? value : 1;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function launchMessage(params: AgentRuntimeLaunchParams): string {

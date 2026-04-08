@@ -214,11 +214,39 @@ export interface RuntimeMetrics {
   failoverCount?: number;
 }
 
+export type RuntimeLifecycleState =
+  | "launch_requested"
+  | "launch_started"
+  | "resume_requested"
+  | "resume_started"
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "destroyed"
+  | "replayed";
+
+export interface RuntimeEventEnvelope {
+  id: string;
+  timestamp: string;
+  eventType: "runtime.lifecycle" | "queue.intent";
+  lifecycle: RuntimeLifecycleState;
+  taskId: string;
+  correlationId: string | null;
+  agentName: string;
+  runtimeType: RuntimeType | "unknown";
+  runtimeId: string | null;
+  details?: Record<string, unknown>;
+}
+
 export interface RuntimeResult {
   exitStatus: RuntimeExitStatus;
   handoffReportPath: string | null;
   artifacts: RuntimeArtifact[];
   metrics: RuntimeMetrics;
+  lifecycleState?: RuntimeLifecycleState;
+  lastLifecycleEvent?: RuntimeEventEnvelope | null;
+  lifecycleEvents?: RuntimeEventEnvelope[];
 }
 
 export interface AgentRuntimeLaunchParams {
@@ -420,6 +448,39 @@ export interface DelegationParams {
   timeBudget: number;
   parentTaskId: string | null;
   delegationDepth: number;
+}
+
+export type ExecutionIntentKind = "launch" | "resume" | "reconcile" | "remediation";
+export type ExecutionIntentStatus = "pending" | "in_progress" | "completed" | "skipped" | "failed";
+
+export interface SerializedError {
+  name: string;
+  message: string;
+  code?: string;
+  retryable?: boolean;
+  details?: Record<string, unknown>;
+}
+
+export interface ExecutionIntentResult {
+  runtimeId?: string | null;
+  runtimeType?: RuntimeType | "unknown";
+  note?: string;
+}
+
+export interface ExecutionIntentRecord {
+  id: string;
+  kind: ExecutionIntentKind;
+  status: ExecutionIntentStatus;
+  dedupeKey: string;
+  taskId: string;
+  correlationId: string | null;
+  params: DelegationParams;
+  createdAt: string;
+  updatedAt: string;
+  attempts: number;
+  lastError: SerializedError | null;
+  result: ExecutionIntentResult | null;
+  events: RuntimeEventEnvelope[];
 }
 
 export interface RuntimePolicyManifest {
