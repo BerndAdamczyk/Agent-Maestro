@@ -161,6 +161,14 @@ async function main() {
   if (isResume) {
     logger.logEntry("Maestro", "Resuming session from workspace state", { level: "info" });
     recoverPersistedWorkers(taskManager, delegationEngine, runtime, logger, memory);
+    const replayedDelegations = delegationEngine.replayPendingDelegations();
+    if (replayedDelegations.length > 0) {
+      logger.logEntry(
+        "Resume",
+        `Re-queued ${replayedDelegations.length} persisted launch intent(s): ${replayedDelegations.map(intent => intent.taskId).join(", ")}`,
+        { level: "info" },
+      );
+    }
     const tasks = taskManager.getAllTasks();
     const maxWave = Math.max(0, ...tasks.map(t => t.wave));
     const completedWaves = new Set<number>();

@@ -14,6 +14,7 @@ import type {
   ActiveWorker,
   DelegationParams,
   AgentDefinition,
+  ExecutionIntentRecord,
   PersistedActiveWorker,
   RuntimePolicyManifest,
   TaskPhase,
@@ -28,6 +29,8 @@ import { hasPiModelCredentials } from "./pi-runtime-support.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { RuntimePolicyManager } from "./runtime/policy.js";
 import { atomicWrite } from "./utils.js";
+import { MaestroError, SpawnBudgetExhaustedError } from "./errors.js";
+import { ExecutionIntentQueue } from "./runtime/intent-queue.js";
 
 export interface DelegationQueue {
   params: DelegationParams;
@@ -47,6 +50,7 @@ export class DelegationEngine {
   private activeWorkers = new Map<string, ActiveWorker>();
   private delegationQueue: DelegationQueue[] = [];
   private activeWorkerStatePath: string;
+  private intentQueue: ExecutionIntentQueue;
 
   constructor(
     rootDir: string,
@@ -68,7 +72,9 @@ export class DelegationEngine {
     this.memory = memory;
     this.policyManager = new RuntimePolicyManager(rootDir, config);
     this.activeWorkerStatePath = join(rootDir, config.paths.workspace, "runtime-state", "active-workers.json");
-    mkdirSync(join(rootDir, config.paths.workspace, "runtime-state"), { recursive: true });
+    const workspaceDir = join(rootDir, config.paths.workspace);
+    mkdirSync(join(workspaceDir, "runtime-state"), { recursive: true });
+    this.intentQueue = new ExecutionIntentQueue(workspaceDir);
   }
 
   /**
@@ -83,15 +89,28 @@ export class DelegationEngine {
 
     // Depth guard
     if (params.delegationDepth > this.config.limits.max_delegation_depth) {
-      throw new Error(
-        `Delegation depth ${params.delegationDepth} exceeds max ${this.config.limits.max_delegation_depth}`
+      throw new MaestroError(
+        "DELEGATION_DEPTH_EXCEEDED",
+        `Delegation depth ${params.delegationDepth} exceeds max ${this.config.limits.max_delegation_depth}`,
+        {
+          details: {
+            taskId: params.taskId,
+            delegationDepth: params.delegationDepth,
+            maxDelegationDepth: this.config.limits.max_delegation_depth,
+          },
+        },
       );
     }
 
     // Resolve agent definition
     const agent = this.agentResolver.findAgentByName(params.agentName);
     if (!agent) {
-      throw new Error(`Agent not found: ${params.agentName}`);
+      throw new MaestroError("AGENT_NOT_FOUND", `Agent not found: ${params.agentName}`, {
+        details: {
+          taskId: params.taskId,
+          agentName: params.agentName,
+        },
+      });
     }
 
     // Check agent has delegate capability (if needed)
@@ -110,6 +129,7 @@ export class DelegationEngine {
       planFirst: params.planFirst,
       timeBudget: params.timeBudget,
     });
+    const launchIntent = this.intentQueue.enqueueLaunch(params, task.correlationId);
 
     // Spawn budget check
     if (!this.runtime.hasCapacity()) {
@@ -118,8 +138,12 @@ export class DelegationEngine {
         taskId: task.id,
         correlationId: task.correlationId,
       });
-      this.delegationQueue.push({ params, queuedAt: new Date() });
-      throw new Error("Spawn budget exhausted, delegation queued");
+      this.enqueueDelegation(params);
+      throw new SpawnBudgetExhaustedError({
+        taskId: task.id,
+        correlationId: task.correlationId,
+        agentName: params.agentName,
+      });
     }
 
     // Initialize session DAG (Level 1 memory)
@@ -153,25 +177,37 @@ export class DelegationEngine {
     });
     const model = this.pickLaunchModel(agent);
 
-    const runtimeHandle = this.runtime.launch({
-      agentName: params.agentName,
-      taskId: task.id,
-      correlationId: task.correlationId,
-      role,
-      phase: task.phase,
-      model,
-      systemPrompt: prompt,
-      promptFilePath: policy.promptFilePath,
-      taskFilePath: this.taskManager.getTaskFilePath(task.id),
-      sessionFilePath: policy.sessionFilePath,
-      policyManifestPath: this.policyManager.getPolicyManifestPath(task.id),
-      workspaceRoot: this.rootDir,
-      allowedTools: policy.allowedTools,
-      timeoutMs: params.timeBudget * 1000,
-      env: {
-        MAESTRO_TASK_ID: task.id,
-        MAESTRO_AGENT_NAME: params.agentName,
-      },
+    this.intentQueue.markInProgress(launchIntent.id);
+    let runtimeHandle;
+    try {
+      runtimeHandle = this.runtime.launch({
+        agentName: params.agentName,
+        taskId: task.id,
+        correlationId: task.correlationId,
+        role,
+        phase: task.phase,
+        model,
+        systemPrompt: prompt,
+        promptFilePath: policy.promptFilePath,
+        taskFilePath: this.taskManager.getTaskFilePath(task.id),
+        sessionFilePath: policy.sessionFilePath,
+        policyManifestPath: this.policyManager.getPolicyManifestPath(task.id),
+        workspaceRoot: this.rootDir,
+        allowedTools: policy.allowedTools,
+        timeoutMs: params.timeBudget * 1000,
+        env: {
+          MAESTRO_TASK_ID: task.id,
+          MAESTRO_AGENT_NAME: params.agentName,
+        },
+      });
+    } catch (error) {
+      this.intentQueue.markFailed(launchIntent.id, error);
+      throw error;
+    }
+    this.intentQueue.markCompleted(launchIntent.id, {
+      runtimeId: runtimeHandle.id,
+      runtimeType: runtimeHandle.runtimeType,
+      note: "Runtime launch persisted successfully",
     });
     this.memory.sessionDAG.append(task.id, {
       role: "assistant",
@@ -222,6 +258,28 @@ export class DelegationEngine {
 
     const next = this.delegationQueue.shift()!;
     return next.params;
+  }
+
+  replayPendingDelegations(taskIds?: string[]): DelegationParams[] {
+    const tasks = new Map(
+      this.taskManager
+        .getAllTasks()
+        .filter(task => !taskIds || taskIds.includes(task.id))
+        .map(task => [task.id, task] as const),
+    );
+    const replayable = this.intentQueue.replayPendingLaunches({
+      tasks,
+      activeWorkers: this.activeWorkers,
+    });
+    const newlyQueued: DelegationParams[] = [];
+
+    for (const params of replayable) {
+      if (this.enqueueDelegation(params)) {
+        newlyQueued.push(params);
+      }
+    }
+
+    return newlyQueued;
   }
 
   /**
@@ -362,6 +420,20 @@ export class DelegationEngine {
 
   getQueueLength(): number {
     return this.delegationQueue.length;
+  }
+
+  getPersistedExecutionIntents(): ExecutionIntentRecord[] {
+    return this.intentQueue.list();
+  }
+
+  private enqueueDelegation(params: DelegationParams): boolean {
+    const alreadyQueued = this.delegationQueue.some(entry => entry.params.taskId === params.taskId);
+    if (alreadyQueued) {
+      return false;
+    }
+
+    this.delegationQueue.push({ params, queuedAt: new Date() });
+    return true;
   }
 
   private persistActiveWorkers(): void {

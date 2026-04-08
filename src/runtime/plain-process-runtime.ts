@@ -16,6 +16,7 @@ import type { AgentRuntime } from "./agent-runtime.js";
 import { getForwardedProviderEnv, resolvePiAgentDir, resolvePiCommand } from "../pi-runtime-support.js";
 import { appendRuntimeObservation } from "./runtime-log.js";
 import { finalizeRuntimeResult, splitLines, writeTurnMessage } from "./pi-runtime-common.js";
+import { appendRuntimeLifecycleEvent, createRuntimeEventEnvelope } from "./contracts.js";
 
 interface ProcessState {
   child: ChildProcessByStdio<null, Readable, Readable> | null;
@@ -85,7 +86,7 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
       turnNumber: 0,
       pendingResume: null,
       correlationId: params.correlationId ?? null,
-      result: {
+      result: appendRuntimeLifecycleEvent({
         exitStatus: "running",
         handoffReportPath: params.taskFilePath,
         artifacts: [
@@ -111,7 +112,14 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
           retryCount: 0,
           failoverCount: 0,
         },
-      },
+      }, createRuntimeEventEnvelope({
+        lifecycle: "launch_requested",
+        taskId: params.taskId,
+        correlationId: params.correlationId ?? null,
+        agentName: params.agentName,
+        runtimeType: "process",
+        runtimeId: id,
+      })),
     };
 
     this.processes.set(id, state);
@@ -130,6 +138,15 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
       state.policyManifestPath = params.policyManifestPath;
     }
     if (this.isAlive(handle)) {
+      state.result = appendRuntimeLifecycleEvent(state.result, createRuntimeEventEnvelope({
+        lifecycle: "resume_requested",
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+        agentName: handle.agentName,
+        runtimeType: handle.runtimeType,
+        runtimeId: handle.id,
+      }));
+      this.results.set(handle.id, state.result);
       state.pendingResume = params;
       return;
     }
@@ -161,7 +178,18 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
     if (state.child && this.isAlive(handle)) {
       state.child.kill("SIGINT");
     }
-    state.result = finalizeRuntimeResult(state.result, "interrupted");
+    state.result = appendRuntimeLifecycleEvent(
+      finalizeRuntimeResult(state.result, "interrupted"),
+      createRuntimeEventEnvelope({
+        lifecycle: "interrupted",
+        taskId: handle.taskId,
+        correlationId: state.correlationId,
+        agentName: handle.agentName,
+        runtimeType: handle.runtimeType,
+        runtimeId: handle.id,
+        details: { reason },
+      }),
+    );
     this.results.set(handle.id, state.result);
   }
 
@@ -174,7 +202,17 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
       state.child.kill("SIGTERM");
     }
     if (state.result.exitStatus === "running") {
-      state.result = finalizeRuntimeResult(state.result, "interrupted");
+      state.result = appendRuntimeLifecycleEvent(
+        finalizeRuntimeResult(state.result, "interrupted"),
+        createRuntimeEventEnvelope({
+          lifecycle: "destroyed",
+          taskId: handle.taskId,
+          correlationId: state.correlationId,
+          agentName: handle.agentName,
+          runtimeType: handle.runtimeType,
+          runtimeId: handle.id,
+        }),
+      );
       this.results.set(handle.id, state.result);
     }
     state.child = null;
@@ -203,6 +241,18 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
         retryCount: state.turnNumber - 1,
       },
     };
+    state.result = appendRuntimeLifecycleEvent(state.result, createRuntimeEventEnvelope({
+      lifecycle: state.turnNumber === 1 ? "launch_started" : "resume_started",
+      taskId: handle.taskId,
+      correlationId: state.correlationId,
+      agentName: handle.agentName,
+      runtimeType: handle.runtimeType,
+      runtimeId: handle.id,
+      details: {
+        phase,
+        turnNumber: state.turnNumber,
+      },
+    }));
     this.results.set(handle.id, state.result);
 
     const messageFile = writeTurnMessage(
@@ -264,7 +314,21 @@ export class PlainProcessAgentRuntime implements AgentRuntime {
 
     child.on("exit", code => {
       state.child = null;
-      state.result = finalizeRuntimeResult(state.result, code === 0 ? "completed" : "failed");
+      state.result = appendRuntimeLifecycleEvent(
+        finalizeRuntimeResult(state.result, code === 0 ? "completed" : "failed"),
+        createRuntimeEventEnvelope({
+          lifecycle: code === 0 ? "completed" : "failed",
+          taskId: handle.taskId,
+          correlationId: state.correlationId,
+          agentName: handle.agentName,
+          runtimeType: handle.runtimeType,
+          runtimeId: handle.id,
+          details: {
+            exitCode: code,
+            turnNumber: state.turnNumber,
+          },
+        }),
+      );
       this.results.set(handle.id, state.result);
 
       this.runPendingResume(handle, state);
