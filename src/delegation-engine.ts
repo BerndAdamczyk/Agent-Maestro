@@ -29,8 +29,7 @@ import { hasPiModelCredentials } from "./pi-runtime-support.js";
 import type { AgentRuntime } from "./runtime/agent-runtime.js";
 import { RuntimePolicyManager } from "./runtime/policy.js";
 import { atomicWrite } from "./utils.js";
-import { MaestroError, SpawnBudgetExhaustedError } from "./errors.js";
-import { ExecutionIntentQueue } from "./runtime/intent-queue.js";
+import { WorktreeManager } from "./worktree-manager.js";
 
 export interface DelegationQueue {
   params: DelegationParams;
@@ -50,7 +49,7 @@ export class DelegationEngine {
   private activeWorkers = new Map<string, ActiveWorker>();
   private delegationQueue: DelegationQueue[] = [];
   private activeWorkerStatePath: string;
-  private intentQueue: ExecutionIntentQueue;
+  private worktreeManager: WorktreeManager;
 
   constructor(
     rootDir: string,
@@ -71,6 +70,7 @@ export class DelegationEngine {
     this.logger = logger;
     this.memory = memory;
     this.policyManager = new RuntimePolicyManager(rootDir, config);
+    this.worktreeManager = new WorktreeManager(rootDir, config);
     this.activeWorkerStatePath = join(rootDir, config.paths.workspace, "runtime-state", "active-workers.json");
     const workspaceDir = join(rootDir, config.paths.workspace);
     mkdirSync(join(workspaceDir, "runtime-state"), { recursive: true });
@@ -176,38 +176,28 @@ export class DelegationEngine {
       taskWriteScope: task.writeScope,
     });
     const model = this.pickLaunchModel(agent);
+    const workspaceAllocation = this.worktreeManager.allocate(task.id, task.writeScope);
 
-    this.intentQueue.markInProgress(launchIntent.id);
-    let runtimeHandle;
-    try {
-      runtimeHandle = this.runtime.launch({
-        agentName: params.agentName,
-        taskId: task.id,
-        correlationId: task.correlationId,
-        role,
-        phase: task.phase,
-        model,
-        systemPrompt: prompt,
-        promptFilePath: policy.promptFilePath,
-        taskFilePath: this.taskManager.getTaskFilePath(task.id),
-        sessionFilePath: policy.sessionFilePath,
-        policyManifestPath: this.policyManager.getPolicyManifestPath(task.id),
-        workspaceRoot: this.rootDir,
-        allowedTools: policy.allowedTools,
-        timeoutMs: params.timeBudget * 1000,
-        env: {
-          MAESTRO_TASK_ID: task.id,
-          MAESTRO_AGENT_NAME: params.agentName,
-        },
-      });
-    } catch (error) {
-      this.intentQueue.markFailed(launchIntent.id, error);
-      throw error;
-    }
-    this.intentQueue.markCompleted(launchIntent.id, {
-      runtimeId: runtimeHandle.id,
-      runtimeType: runtimeHandle.runtimeType,
-      note: "Runtime launch persisted successfully",
+    const runtimeHandle = this.runtime.launch({
+      agentName: params.agentName,
+      taskId: task.id,
+      correlationId: task.correlationId,
+      role,
+      phase: task.phase,
+      model,
+      systemPrompt: prompt,
+      promptFilePath: policy.promptFilePath,
+      taskFilePath: this.taskManager.getTaskFilePath(task.id),
+      sessionFilePath: policy.sessionFilePath,
+      policyManifestPath: this.policyManager.getPolicyManifestPath(task.id),
+      workspaceRoot: workspaceAllocation.rootDir,
+      allowedTools: policy.allowedTools,
+      timeoutMs: params.timeBudget * 1000,
+      env: {
+        MAESTRO_TASK_ID: task.id,
+        MAESTRO_AGENT_NAME: params.agentName,
+        ...(workspaceAllocation.isolated ? { MAESTRO_WORKTREE_ROOT: workspaceAllocation.rootDir } : {}),
+      },
     });
     this.memory.sessionDAG.append(task.id, {
       role: "assistant",
@@ -290,6 +280,7 @@ export class DelegationEngine {
     if (!worker) return;
 
     this.runtime.destroy(worker.runtimeHandle);
+    this.worktreeManager.finalize(taskId, outcome);
     this.activeWorkers.delete(taskId);
     this.persistActiveWorkers();
 

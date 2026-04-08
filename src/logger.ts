@@ -5,11 +5,11 @@
  * Appends markdown table rows plus a JSONL sidecar. Append-only for concurrent safety.
  */
 
-import { appendFileSync, existsSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { LogEntry, LogLevel } from "./types.js";
 import { redactSecrets, stripUnsafeControlChars } from "./security.js";
-import { formatTimestamp } from "./utils.js";
+import { appendLocked, formatTimestamp } from "./utils.js";
 
 const LOG_HEADER = `# Activity Log
 
@@ -68,8 +68,8 @@ export class Logger {
       "|",
     ].join(" ") + "\n";
 
-    appendFileSync(this.logPath, row, "utf-8");
-    appendFileSync(this.jsonlPath, JSON.stringify(entry) + "\n", "utf-8");
+    appendLocked(this.logPath, row);
+    appendLocked(this.jsonlPath, JSON.stringify(entry) + "\n");
   }
 
   readAll(): LogEntry[] {

@@ -2,7 +2,8 @@
  * Shared utilities.
  */
 
-import { writeFileSync, renameSync } from "node:fs";
+import { appendFileSync, writeFileSync, renameSync } from "node:fs";
+import { withFileLock } from "./lock-manager.js";
 
 /**
  * Atomic file write via write-tmp-then-rename.
@@ -10,9 +11,17 @@ import { writeFileSync, renameSync } from "node:fs";
  * Reference: arc42 Section 8.11 (atomicWrite [target] -- implemented early as quick win)
  */
 export function atomicWrite(filePath: string, content: string): void {
-  const tmp = `${filePath}.tmp.${process.pid}`;
-  writeFileSync(tmp, content, "utf-8");
-  renameSync(tmp, filePath);
+  withFileLock(filePath, () => {
+    const tmp = `${filePath}.tmp.${process.pid}`;
+    writeFileSync(tmp, content, "utf-8");
+    renameSync(tmp, filePath);
+  });
+}
+
+export function appendLocked(filePath: string, content: string): void {
+  withFileLock(filePath, () => {
+    appendFileSync(filePath, content, "utf-8");
+  });
 }
 
 export function upsertMarkdownSection(content: string, heading: string, entryBlock: string): string {
