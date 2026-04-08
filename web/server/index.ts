@@ -59,7 +59,7 @@ export function createWebServer(deps: WebServerDeps) {
   app.use("/api/tasks", taskRoutes(taskManager));
   app.use("/api/agents", agentRoutes(agentResolver));
   app.use("/api/config", configRoutes(config));
-  app.use("/api/session", sessionRoutes(getSession));
+  app.use("/api/session", sessionRoutes(getSession, workspaceDir));
   app.use("/api/skills", skillRoutes(skillsDir));
   app.use("/api/actions", actionRoutes(taskManager, logger));
   app.use("/api/tmux", tmuxRoutes(tmuxService));

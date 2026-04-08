@@ -81,7 +81,43 @@ test("web server rejects symlinked memory paths and omits symlink entries from l
   }
 });
 
-async function startServer(setup) {
+test("web server session route exposes execution intent summary counts", async () => {
+  const webServer = await startServer(rootDir => {
+    mkdirSync(join(rootDir, "workspace", "runtime-state"), { recursive: true });
+    writeFileSync(join(rootDir, "workspace", "runtime-state", "execution-intents.json"), JSON.stringify([
+      { status: "pending" },
+      { status: "pending" },
+      { status: "completed" },
+      { status: "failed" },
+    ], null, 2));
+  }, {
+    sessionId: "session-001",
+    goal: "Ship queue replay",
+    status: "active",
+    startedAt: "2026-04-08T17:00:00+02:00",
+    currentWave: 2,
+    activeWorkers: new Map(),
+  });
+
+  try {
+    const response = await fetch(`${webServer.baseUrl}/api/session/active`);
+    assert.equal(response.status, 200);
+    const json = await response.json();
+
+    assert.deepEqual(json.executionIntentSummary, {
+      total: 4,
+      pending: 2,
+      inProgress: 0,
+      completed: 1,
+      skipped: 0,
+      failed: 1,
+    });
+  } finally {
+    await webServer.stop();
+  }
+});
+
+async function startServer(setup, session = null) {
   const rootDir = mkdtempSync(join(tmpdir(), "agent-maestro-web-"));
   mkdirSync(join(rootDir, "workspace"), { recursive: true });
   mkdirSync(join(rootDir, "skills"), { recursive: true });
@@ -112,7 +148,7 @@ async function startServer(setup) {
     logger: {
       logEntry: () => {},
     },
-    getSession: () => null,
+    getSession: () => session,
   });
 
   await server.start(0, "127.0.0.1");
